@@ -11,9 +11,7 @@
 */
 
 const functions = require('firebase-functions');
-const admin = require('firebase-admin');
-admin.initializeApp();
-const db = admin.firestore();
+const { admin, db } = require('./lib/firebase');
 
 /**
  * Callable Cloud Function: sendLateArrivalWarning

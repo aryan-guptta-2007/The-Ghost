@@ -1,0 +1,42 @@
+{
+  "indexes": [
+    {
+      "_comment": "cancelUnconfirmedBookings: status equality + expiresAt range",
+      "collectionGroup": "confirmations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "expiresAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "_comment": "handleOccupancy: active booking lookup for a room",
+      "collectionGroup": "bookings",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "roomId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "startTime", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "_comment": "dashboard: latest occupancy reading per room",
+      "collectionGroup": "occupancy",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "roomId", "order": "ASCENDING" },
+        { "fieldPath": "timestamp", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "_comment": "confirmAttendance: find enforcement doc for a booking",
+      "collectionGroup": "enforcement",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "bookingId", "order": "ASCENDING" },
+        { "fieldPath": "decision", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

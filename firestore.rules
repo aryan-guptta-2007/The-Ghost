@@ -1,0 +1,104 @@
+rules_version = '2';
+
+// Ghost Resource Buster — Firestore security rules
+//
+// WHY THIS FILE MATTERS:
+// decision_logger.js states "security rules enforce no deletes/updates",
+// but no rules file existed. Without it a Firebase project runs in either
+// test mode (world-readable AND world-writable) or locked mode (nothing
+// works). Either way the audit trail was unenforceable and the admin
+// dashboard exposed every enforcement record to the public internet.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      // Set with: admin.auth().setCustomUserClaims(uid, { admin: true })
+      return isSignedIn() && request.auth.token.admin == true;
+    }
+
+    // ---- Rooms -------------------------------------------------------
+    // Anyone signed in can see room status; only admins edit rooms.
+    // Cloud Functions bypass these rules via the Admin SDK.
+    match /rooms/{roomId} {
+      allow read:  if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // ---- Bookings ----------------------------------------------------
+    // Users read and create their own; only admins see everything.
+    match /bookings/{bookingId} {
+      allow read: if isAdmin()
+                  || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn()
+                    && request.resource.data.userId == request.auth.uid
+                    && request.resource.data.status == 'scheduled';
+      // Users may only cancel their own booking, nothing else.
+      allow update: if isSignedIn()
+                    && resource.data.userId == request.auth.uid
+                    && request.resource.data.status == 'canceled';
+      allow delete: if false;
+    }
+
+    // ---- Occupancy ---------------------------------------------------
+    // Written ONLY by receiveOccupancy via the Admin SDK after HMAC
+    // verification. No client may write here — otherwise anyone could
+    // forge "room is empty" and cancel someone else's booking.
+    match /occupancy/{occId} {
+      allow read:  if isAdmin();
+      allow write: if false;
+    }
+
+    // ---- Enforcement decisions --------------------------------------
+    match /enforcement/{enfId} {
+      allow read:  if isAdmin();
+      allow write: if false;
+    }
+
+    // ---- Confirmations ----------------------------------------------
+    // The owning user may read theirs; status changes go through the
+    // confirmAttendance function, never direct client writes.
+    match /confirmations/{confId} {
+      allow read: if isAdmin()
+                  || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow write: if false;
+    }
+
+    // ---- Append-only audit trail ------------------------------------
+    // Immutability is the whole point: no updates, no deletes, ever.
+    match /audit_logs/{logId} {
+      allow read:   if isAdmin();
+      allow create: if false;  // Admin SDK only
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    match /decision_logs/{logId} {
+      allow read:   if isAdmin();
+      allow create: if false;  // Admin SDK only
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // ---- Users -------------------------------------------------------
+    match /users/{userId} {
+      allow read: if isAdmin() || (isSignedIn() && request.auth.uid == userId);
+      // A user may register their own FCM token but nothing else.
+      allow update: if isSignedIn()
+                    && request.auth.uid == userId
+                    && request.resource.data.diff(resource.data)
+                         .affectedKeys().hasOnly(['fcmToken']);
+      allow create: if isSignedIn() && request.auth.uid == userId;
+      allow delete: if false;
+    }
+
+    // Deny anything not explicitly matched above.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

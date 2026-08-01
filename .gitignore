@@ -1,0 +1,28 @@
+# Secrets — never commit these
+.env
+.env.local
+.firebaserc
+serviceAccountKey.json
+*-firebase-adminsdk-*.json
+
+# Runtime artifacts
+edge_ai/pending_payloads.db
+energy/energy_log.jsonl
+*.jsonl
+
+# Node
+node_modules/
+npm-debug.log*
+firebase-debug.log*
+.firebase/
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

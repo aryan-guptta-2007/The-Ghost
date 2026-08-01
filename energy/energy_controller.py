@@ -172,4 +172,3 @@ if __name__ == "__main__":
     print(controller.update_room_status(room, False))  # human leaves → devices off
     # Check the log file
     print("Log written to", _LOG_FILE)
-```

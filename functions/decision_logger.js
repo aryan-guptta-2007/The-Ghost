@@ -2,9 +2,7 @@
 // Helper to write immutable decision logs to Firestore collection "decision_logs".
 // All fields are non‑PII. The collection is append‑only; security rules enforce no deletes/updates.
 
-const admin = require('firebase-admin');
-admin.initializeApp();
-const db = admin.firestore();
+const { admin, db } = require('./lib/firebase');
 
 /**
  * Log a decision made by any agent.

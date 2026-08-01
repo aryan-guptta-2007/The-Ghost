@@ -2,75 +2,86 @@
 """Camera capture module for Ghost Resource Buster.
 
 - Accesses the default webcam (or a specified device index).
-- Captures a single frame every 2 seconds.
-- Does **not** store any image or video data on disk.
-- Designed for low‑power edge devices (e.g., Raspberry Pi, Jetson Nano).
-- Provides a simple generator `capture_frames()` that yields metadata
-  (timestamp, device_id, frame_shape) which can be fed directly to the
-  edge‑AI detector.
+- Captures a frame every CAPTURE_INTERVAL seconds.
+- Never writes image or video data to disk.
+- Designed for low-power edge devices (Raspberry Pi, Jetson Nano).
+
+CHANGE vs. the original version
+-------------------------------
+The original yielded only (timestamp, device_id, frame_shape) and dropped
+the frame. That made real detection impossible downstream — the orchestrator
+had nothing to analyse, so it fell back to `"occupied" if shape else "vacant"`,
+which is always "occupied".
+
+The frame is now yielded so human_presence.PresenceDetector can analyse it
+in memory. The privacy guarantee is unchanged and now enforced by contract:
+frames are never persisted and never leave the device; only a boolean and a
+confidence score are transmitted.
 """
 
-import cv2
+import os
 import time
 from typing import Generator, Tuple
 
-# Configuration – can be moved to a settings file later
-DEVICE_INDEX = 0  # default webcam; change if multiple cameras are present
-CAPTURE_INTERVAL = 2.0  # seconds between captures
-DEVICE_ID = "edge_cam_01"  # unique identifier for this edge device
+import cv2
+
+DEVICE_INDEX = int(os.getenv("DEVICE_INDEX_NUM", "0"))
+CAPTURE_INTERVAL = float(os.getenv("GHOST_CAPTURE_INTERVAL", "2.0"))
+DEVICE_ID = os.getenv("DEVICE_ID", "edge_cam_01")
+FRAME_WIDTH = int(os.getenv("GHOST_FRAME_WIDTH", "320"))
+FRAME_HEIGHT = int(os.getenv("GHOST_FRAME_HEIGHT", "240"))
 
 
 def _init_camera() -> cv2.VideoCapture:
-    """Initialize the webcam with minimal resource usage.
-
-    Returns
-    -------
-    cv2.VideoCapture
-        The opened video capture object.
-    """
+    """Initialize the webcam with minimal resource usage."""
     cap = cv2.VideoCapture(DEVICE_INDEX)
-    # Reduce resolution to lower compute & power consumption (e.g., 320x240)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
-    # Limit FPS to the capture interval to avoid unnecessary reads
-    cap.set(cv2.CAP_PROP_FPS, 1 / CAPTURE_INTERVAL)
+    # Low resolution keeps compute and power draw down on edge hardware.
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+    # Small buffer so we always analyse a fresh frame, not a stale one.
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     if not cap.isOpened():
-        raise RuntimeError("Unable to open webcam (device index %d)" % DEVICE_INDEX)
+        raise RuntimeError(f"Unable to open webcam (device index {DEVICE_INDEX})")
     return cap
 
 
-def capture_frames() -> Generator[Tuple[float, str, Tuple[int, int, int]], None, None]:
-    """Yield metadata for a frame captured every ``CAPTURE_INTERVAL`` seconds.
+def capture_frames() -> Generator[Tuple[float, str, "cv2.Mat"], None, None]:
+    """Yield (timestamp, device_id, frame) every CAPTURE_INTERVAL seconds.
 
-    The actual image data is **not** returned or stored – only the shape and a
-    timestamp are emitted. Downstream modules (e.g., the MediaPipe/TFLite
-    detector) can request the raw frame via the generator if needed, but the
-    default behaviour respects the privacy‑first requirement.
+    The frame is passed in memory only. Callers must not persist it.
     """
     cap = _init_camera()
+    consecutive_failures = 0
     try:
         while True:
             ret, frame = cap.read()
             if not ret:
-                # If a frame cannot be read, wait a bit and retry
+                consecutive_failures += 1
+                # Camera may have been unplugged — try a full re-init.
+                if consecutive_failures >= 5:
+                    print("[Camera] repeated read failures, reinitialising")
+                    cap.release()
+                    time.sleep(2.0)
+                    try:
+                        cap = _init_camera()
+                        consecutive_failures = 0
+                    except RuntimeError as exc:
+                        print(f"[Camera] reinit failed: {exc}")
                 time.sleep(CAPTURE_INTERVAL)
                 continue
-            timestamp = time.time()
-            # Frame shape: (height, width, channels)
-            shape = frame.shape
-            # Yield only metadata; the frame variable will be garbage‑collected
-            yield (timestamp, DEVICE_ID, shape)
-            # Sleep for the remainder of the interval
+
+            consecutive_failures = 0
+            yield (time.time(), DEVICE_ID, frame)
             time.sleep(CAPTURE_INTERVAL)
     finally:
-        # Ensure the camera is released even if the generator is stopped
         cap.release()
 
 
 if __name__ == "__main__":
-    # Simple demo: print metadata for 5 captures
     gen = capture_frames()
     for _ in range(5):
-        meta = next(gen)
-        print(f"Captured at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(meta[0]))}, "
-              f"device={meta[1]}, shape={meta[2]}")
+        ts, dev, frame = next(gen)
+        print(
+            f"Captured at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))}, "
+            f"device={dev}, shape={frame.shape}"
+        )
