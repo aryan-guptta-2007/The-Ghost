@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Cloud Functions for Ghost Resource Buster",
   "main": "index.js",
-  "engines": { "node": "18" },
+  "engines": { "node": "22" },
   "scripts": {
     "lint": "eslint .",
     "serve": "firebase emulators:start --only functions,firestore",

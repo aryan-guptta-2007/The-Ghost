@@ -38,7 +38,7 @@ import numpy as np
 # Tunables — override via environment variables
 # ----------------------------------------------------------------------
 # Minimum per-frame confidence for a detection to count as a person.
-MIN_CONFIDENCE = float(os.getenv("GHOST_MIN_CONFIDENCE", "0.5"))
+MIN_CONFIDENCE = float(os.getenv("GHOST_MIN_CONFIDENCE", "0.3"))
 # Sliding window of recent frames used for the debounce decision.
 WINDOW_SIZE = int(os.getenv("GHOST_WINDOW_SIZE", "10"))
 # How many frames in the window must agree before we flip state.
@@ -53,10 +53,14 @@ class _MediaPipeBackend:
     def __init__(self):
         import mediapipe as mp
 
+        # static_image_mode=True runs a fresh detection on every frame.
+        # With tracking enabled, MediaPipe keeps reporting landmarks for a
+        # person who has already left, which made present and absent
+        # confidence ranges overlap and the signal unusable.
         self._pose = mp.solutions.pose.Pose(
-            static_image_mode=False,
-            model_complexity=0,          # lightest model for edge devices
-            min_detection_confidence=MIN_CONFIDENCE,
+            static_image_mode=True,
+            model_complexity=1,
+            min_detection_confidence=0.5,
         )
 
     def detect(self, frame) -> Tuple[bool, float]:
@@ -67,10 +71,20 @@ class _MediaPipeBackend:
         result = self._pose.process(rgb)
         if not result.pose_landmarks:
             return False, 0.0
-        # Mean visibility of detected landmarks as a confidence proxy.
-        visibilities = [lm.visibility for lm in result.pose_landmarks.landmark]
-        confidence = float(np.mean(visibilities)) if visibilities else 0.0
-        return confidence >= MIN_CONFIDENCE, confidence
+        # Upper-body landmarks only: nose, eyes, ears, shoulders, elbows.
+        # Averaging all 33 landmarks penalises seated people whose legs are
+        # not visible to a desk-mounted webcam, which is the normal case.
+        UPPER_BODY = [0, 2, 5, 7, 8, 11, 12, 13, 14]
+        landmarks = result.pose_landmarks.landmark
+        visibilities = [landmarks[i].visibility for i in UPPER_BODY]
+        # Fraction of upper-body landmarks clearly visible, rather than a
+        # mean. A mean is dragged down by a few occluded points even when
+        # the person is plainly there.
+        clear = sum(1 for v in visibilities if v > 0.5)
+        confidence = clear / len(visibilities) if visibilities else 0.0
+        # MediaPipe returning landmarks at all is itself strong evidence,
+        # so presence is the detection, and confidence is the quality of it.
+        return True, confidence
 
     def close(self):
         self._pose.close()

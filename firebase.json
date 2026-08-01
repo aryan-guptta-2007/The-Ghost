@@ -1,7 +1,7 @@
 {
   "functions": {
     "source": "functions",
-    "runtime": "nodejs18",
+    "runtime": "nodejs22",
     "ignore": ["node_modules", ".git", "*.log"]
   },
   "firestore": {
@@ -17,6 +17,7 @@
     "functions": { "port": 5001 },
     "firestore": { "port": 8080 },
     "hosting": { "port": 5000 },
+    "pubsub": { "port": 8085 },
     "ui": { "enabled": true }
   }
 }

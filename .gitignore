@@ -4,6 +4,7 @@
 .firebaserc
 serviceAccountKey.json
 *-firebase-adminsdk-*.json
+functions/.runtimeconfig.json
 
 # Runtime artifacts
 edge_ai/pending_payloads.db
