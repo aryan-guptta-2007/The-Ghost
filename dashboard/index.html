@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ghost Resource Buster – Admin Dashboard</title>
+  <link rel="stylesheet" href="style.css" />
+  <!-- Firebase SDKs (App, Firestore) -->
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Ghost Resource Buster – Admin Dashboard</h1>
+  </header>
+
+  <section id="summary">
+    <div class="card" id="ghost-count">
+      <h2>Ghost Violations</h2>
+      <p class="value" id="ghost-violations">0</p>
+    </div>
+    <div class="card" id="reclaimed-count">
+      <h2>Reclaimed Resources</h2>
+      <p class="value" id="reclaimed-resources">0</p>
+    </div>
+    <div class="card" id="energy-savings">
+      <h2>Energy Savings</h2>
+      <p class="value" id="energy-kwh">0 kWh</p>
+    </div>
+  </section>
+
+  <section id="rooms">
+    <h2>Room Status</h2>
+    <ul id="room-list"></ul>
+  </section>
+
+  <script src="app.js"></script>
+</body>
+</html>
