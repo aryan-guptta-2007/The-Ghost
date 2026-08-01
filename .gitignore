@@ -27,3 +27,6 @@ venv/
 .DS_Store
 .vscode/
 .idea/
+
+firestore-debug.log
+pubsub-debug.log
