@@ -9,7 +9,7 @@ Each payload includes:
   - timestamp (ISO-8601 string, UTC)
   - signature (hex HMAC-SHA256 over the canonical JSON of the fields above)
 
-The signature is verified in functions/lib/hmac.js before any processing.
+The signature is verified in backend/lib/hmac.js before any processing.
 """
 
 import os
@@ -19,10 +19,10 @@ import hashlib
 
 import requests
 
-# Backend endpoint – must match the deployed receiveOccupancy URL.
+# Backend endpoint: the deployed /api/occupancy URL on Vercel.
 BACKEND_URL = os.getenv(
     "GHOST_BACKEND_URL",
-    "https://<your-project>.cloudfunctions.net/receiveOccupancy",
+    "https://<your-app>.vercel.app/api/occupancy",
 )
 
 
@@ -48,7 +48,7 @@ def _normalise_confidence(value: float):
 def _canonical_json(payload: dict) -> str:
     """Deterministic JSON for signing: sorted keys, no whitespace, raw UTF-8.
 
-    Must match canonicalJson() in functions/lib/hmac.js byte for byte.
+    Must match canonicalJson() in backend/lib/hmac.js byte for byte.
     """
     return json.dumps(payload, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
 
@@ -82,8 +82,9 @@ def send_room_metadata(room_id: str, status: str, confidence: float, timestamp: 
             timeout=int(os.getenv("GHOST_TIMEOUT", "10")),
             verify=True,
         )
-        # 409 means the backend already has this exact payload (a retry of
-        # something that did arrive), so it counts as delivered.
+        # 409 means the backend already has this reading or a newer one (a
+        # retry of something that did arrive, or a late queued reading that
+        # has been superseded), so there is nothing left to deliver.
         if resp.status_code == 409:
             return {"success": True, "response": {"duplicate": True}}
         resp.raise_for_status()

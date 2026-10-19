@@ -1,4 +1,4 @@
-// functions/decision_logger.js
+// backend/decision_logger.js
 // Helper to write immutable decision logs to Firestore collection "decision_logs".
 // All fields are non-PII. The collection is append-only; firestore.rules deny
 // client writes, updates and deletes.

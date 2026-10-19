@@ -1,19 +1,42 @@
-// functions/lib/config.js
-// Enforcement policy and shared constants. One place to tune timings.
+// backend/lib/config.js
+// Enforcement policy, secrets and shared constants. One place to tune timings.
+//
+// The timings are sized for Firestore's free (Spark) daily quota; see
+// "Running for free" in the README for the arithmetic.
 
-const { defineSecret } = require('firebase-functions/params');
+const { usingEmulator } = require('./firebase');
 
-// Shared HMAC secret between edge devices and receiveOccupancy.
-// Set with: firebase functions:secrets:set GHOST_HMAC_SECRET
-// Emulator: put GHOST_HMAC_SECRET=... in functions/.secret.local
-const HMAC_SECRET = defineSecret('GHOST_HMAC_SECRET');
+/**
+ * A secret from the environment. In production these are Vercel env vars.
+ * Against the local emulators a fixed dev value is used so `npm run demo`
+ * needs no setup; that fallback can never apply to a real project.
+ */
+function secret(name, devValue) {
+  const value = process.env[name];
+  if (value) return value;
+  if (usingEmulator()) return devValue;
+  throw new Error(`${name} is not set`);
+}
+const hmacSecret = () => secret('GHOST_HMAC_SECRET', 'local-dev-secret');
+const cronSecret = () => secret('CRON_SECRET', 'local-cron-secret');
+
+const envInt = (name, fallback) => {
+  const n = Number.parseInt(process.env[name], 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
 
 // How long a booking may sit empty before the owner is warned.
 const GRACE_SECONDS = 10 * 60;
 // How long the owner has to answer the warning before the room is reclaimed.
 const CONFIRM_WINDOW_SECONDS = 5 * 60;
-// No reading for this long means the device is offline. Edge heartbeat is 60s.
-const STALE_SECONDS = 3 * 60;
+// No reading for this long means the device is offline. The edge heartbeat
+// is 5 minutes, so this allows one missed heartbeat plus delivery delay.
+const STALE_SECONDS = envInt('GHOST_STALE_SECONDS', 12 * 60);
+// The cron endpoint is called every minute. Reclaiming runs every call (it
+// costs one read when there is nothing to do); the full sweep of running
+// bookings only every Nth minute, because live heartbeats are already
+// evaluated as they arrive and the sweep is there to catch silent devices.
+const SWEEP_EVERY_MINUTES = envInt('GHOST_SWEEP_EVERY_MINUTES', 5);
 // Signed payloads older or newer than this are rejected.
 const MAX_CLOCK_SKEW_SECONDS = 5 * 60;
 // AC + lighting draw for a typical classroom, used when a room has no powerKw.
@@ -51,7 +74,9 @@ function energySavedKwh(powerKw, remainingMs) {
 }
 
 module.exports = {
-  HMAC_SECRET,
+  hmacSecret,
+  cronSecret,
+  SWEEP_EVERY_MINUTES,
   GRACE_SECONDS,
   CONFIRM_WINDOW_SECONDS,
   STALE_SECONDS,

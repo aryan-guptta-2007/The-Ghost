@@ -6,8 +6,7 @@ const { describe, test, before, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const h = require('./helpers');
 const { db, Timestamp } = require('../lib/firebase');
-const { ingestReading } = require('../receive_occupancy');
-const { evaluateReading } = require('../handle_occupancy');
+const { receiveReading } = require('../occupancy');
 const { sweepActiveBookingsLogic } = require('../sweep_active_bookings');
 const { cancelUnconfirmedBookingsLogic } = require('../cancel_unconfirmed_booking');
 const { confirmLogic } = require('../confirm_attendance');
@@ -21,11 +20,11 @@ const NOTHING_RECLAIMED = { expired: 0, reclaimed: 0 };
 before(h.requireEmulators);
 beforeEach(h.resetEmulators);
 
-/** Push a signed reading through ingest, then run the trigger on it. */
+/** Send a signed reading through the same path as POST /api/occupancy; returns the verdict. */
 async function reading(roomId, status, opts) {
-  const res = await ingestReading(h.signedPayload(roomId, status, opts), h.SECRET);
-  assert.equal(res.status, 200, JSON.stringify(res.body));
-  return evaluateReading({ roomId, humanPresent: status === 'occupied' });
+  const res = await receiveReading(h.signedPayload(roomId, status, opts), h.SECRET);
+  assert.equal(res.success, true);
+  return res.outcome;
 }
 
 describe('ghost path', () => {
@@ -110,34 +109,42 @@ describe('confirm path', () => {
 
 describe('ingest security', () => {
   beforeEach(() => h.addRoom('room_101'));
+  const receive = (payload) => receiveReading(payload, h.SECRET);
 
   test('an exact replay is rejected even inside the freshness window', async () => {
     const payload = h.signedPayload('room_101', 'occupied');
-    assert.equal((await ingestReading(payload, h.SECRET)).status, 200);
-    assert.equal((await ingestReading(payload, h.SECRET)).status, 409);
+    assert.equal((await receive(payload)).success, true);
+    await assert.rejects(receive(payload), { status: 409 });
   });
 
   test('forged, stale and unknown-room payloads are rejected', async () => {
     const forged = { ...h.signedPayload('room_101', 'vacant'), status: 'occupied' };
-    assert.equal((await ingestReading(forged, h.SECRET)).status, 401);
+    await assert.rejects(receive(forged), { status: 401 });
 
     const stale = h.signedPayload('room_101', 'occupied', { at: new Date(Date.now() - 10 * 60_000) });
-    assert.equal((await ingestReading(stale, h.SECRET)).status, 400);
+    await assert.rejects(receive(stale), { status: 400 });
 
-    assert.equal((await ingestReading(h.signedPayload('room_999', 'vacant'), h.SECRET)).status, 404);
+    await assert.rejects(receive(h.signedPayload('room_999', 'vacant')), { status: 404 });
   });
 
-  test('a late-arriving old reading does not overwrite a newer one', async () => {
-    await ingestReading(h.signedPayload('room_101', 'occupied'), h.SECRET);
-    await ingestReading(h.signedPayload('room_101', 'vacant', { at: new Date(Date.now() - 60_000) }), h.SECRET);
+  test('a late-arriving older reading is refused and does not overwrite a newer one', async () => {
+    await receive(h.signedPayload('room_101', 'occupied'));
+    const late = h.signedPayload('room_101', 'vacant', { at: new Date(Date.now() - 60_000) });
+    await assert.rejects(receive(late), { status: 409 });
     assert.equal((await h.doc('rooms/room_101')).lastReading.humanPresent, true);
+  });
+
+  test('a reading costs one write: nothing is stored besides the room', async () => {
+    await receive(h.signedPayload('room_101', 'vacant'));
+    const collections = (await db.listCollections()).map((c) => c.id);
+    assert.deepEqual(collections, ['rooms']);
   });
 });
 
 describe('device offline (sweep)', () => {
   test('silent, never-reporting and vacant rooms are warned; occupied ones are not', async () => {
     const fresh = Timestamp.now();
-    const old = Timestamp.fromMillis(Date.now() - 5 * 60_000);
+    const old = Timestamp.fromMillis(Date.now() - 15 * 60_000); // past the 12-minute limit
     await h.addRoom('silent', { lastReading: { humanPresent: true, timestamp: old } });
     await h.addRoom('never');
     await h.addRoom('vacant', { lastReading: { humanPresent: false, timestamp: fresh } });

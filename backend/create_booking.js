@@ -1,18 +1,17 @@
-// functions/create_booking.js
+// backend/create_booking.js
 /*
-  createBooking (HTTP POST /api/bookings): book a room.
+  POST /api/bookings: book a room.
 
   Requires a Firebase ID token. Body:
     { "roomId": "room_101", "startTime": "<ISO-8601>", "durationMinutes": 60 }
 
-  Bookings go through this function rather than direct client writes
+  Bookings go through this endpoint rather than direct client writes
   because the overlap check needs a transactional query, which security
   rules cannot express.
 */
 
-const { onRequest } = require('firebase-functions/v2/https');
 const { db, Timestamp } = require('./lib/firebase');
-const { HttpError, verifyBearer, sendError } = require('./lib/auth');
+const { HttpError } = require('./lib/auth');
 const { ACTIVE_STATUSES, MIN_BOOKING_MINUTES, MAX_BOOKING_MINUTES } = require('./lib/config');
 
 const MAX_ADVANCE_DAYS = 30;
@@ -71,17 +70,4 @@ async function createBookingLogic(uid, { roomId, startTime, durationMinutes }, e
   return { success: true, bookingId: bookingRef.id, startTime: start.toISOString(), endTime: endTs.toDate().toISOString() };
 }
 
-const createBooking = onRequest({ cors: true }, async (req, res) => {
-  if (req.method !== 'POST') {
-    return res.status(405).send({ error: 'Method Not Allowed' });
-  }
-  try {
-    const token = await verifyBearer(req);
-    const result = await createBookingLogic(token.uid, req.body || {});
-    return res.status(201).send(result);
-  } catch (err) {
-    return sendError(res, err, 'createBooking');
-  }
-});
-
-module.exports = { createBooking, createBookingLogic };
+module.exports = { createBookingLogic };

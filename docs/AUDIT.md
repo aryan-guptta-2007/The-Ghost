@@ -68,7 +68,7 @@ After round 1 the parts worked on their own, but the chain still stopped halfway
 | 26 | **New: every vacant reading failed its signature check.** Python serialises `0.0` as `"0.0"` and JavaScript as `"0"`. A vacant room reports exactly `0.0`, so the canonical JSON differed and the backend returned 401. I only found this by writing a cross-language test vector. | The edge normalises whole floats to ints and signs raw UTF-8. Both test suites assert the same signature. |
 | 27 | **New:** the "Reclaimed" card counted `status in ['resolved','canceled']`, but `resolved` meant a person *was* present, and the confirm path wrote `decision`, not `status`. | One status field per record (`warned → confirmed / cleared / reclaimed`) and counters maintained by the backend. |
 | 28 | **New:** the secret used deprecated `functions.config()`, and the SDKs were two majors behind. | `defineSecret('GHOST_HMAC_SECRET')` via Secret Manager. Upgraded to firebase-functions 7 (v2 API) and firebase-admin 14. |
-| 25 | No lint config, no tests, no CI, and `decision_logger.js` was imported by nothing. | ESLint flat config, 27 Node tests (most against the Firestore and Auth emulators), 7 pytest tests on the edge, and GitHub Actions running both. Every decision is now written through `decision_logger.js` and shown in the dashboard's decision log. |
+| 25 | No lint config, no tests, no CI, and `decision_logger.js` was imported by nothing. | ESLint flat config, Node tests (most against the Firestore and Auth emulators), 7 pytest tests on the edge, and GitHub Actions running both. Every decision is now written through `decision_logger.js` and shown in the dashboard's decision log. |
 
 ### What the tests cover
 
@@ -81,6 +81,25 @@ After round 1 the parts worked on their own, but the chain still stopped halfway
 - **Demo controls:** staff-only, demo rooms only, short timers.
 
 ---
+
+## Round 3: running for ₹0
+
+I want this live without a credit card. Cloud Functions requires Firebase's
+paid Blaze plan, so I moved the backend to Vercel's free Hobby plan and kept
+Firestore, Auth and Hosting on Spark.
+
+| What changed | Why |
+|---|---|
+| The functions became plain handlers in `backend/api/`, deployed as Vercel serverless functions. `firebase-admin` authenticates with a service account key held only in Vercel's environment variables. | Spark cannot deploy Cloud Functions. The key never touches the repo, and `.gitignore` blocks the usual key filenames as a backstop. |
+| The `handleOccupancy` trigger is gone. `POST /api/occupancy` stores a reading and judges it in the same request. | Vercel has no Firestore triggers. |
+| One `POST /api/cron` endpoint, called every minute by cron-job.org with a bearer secret. It reclaims every call and sweeps every 5th minute. | Vercel Hobby cron runs once a day at most. The sweep reads every running booking, so running it every minute would use too much of the read quota. |
+| Replay protection moved from "one occupancy doc per reading" to "a reading must be newer than the room's last one". | The same guarantee for replays, with one write per reading instead of two, and no sensor history stored. |
+| Edge heartbeat 60s → 5 min; offline threshold 3 → 12 min. State changes are still sent immediately. | At 60s with a doc per reading, a room cost about 4,300 writes a day, which is 4–5 rooms on the free tier. Now it is about 290 writes and 860 reads a day, which fits about 35 rooms. The budget is worked out in the README. |
+| The local dev server (`npm run dev` / `npm run demo`) serves the same `api/` files against the emulators and runs the cron jobs itself. | The demo still needs no accounts at all. |
+
+I found one bug along the way. `preferRest` (REST instead of gRPC, for faster
+cold starts) makes the Admin SDK ignore `FIRESTORE_EMULATOR_HOST` and look for
+real credentials. Production uses REST; the emulator keeps gRPC.
 
 ## Where it stands
 
@@ -96,7 +115,7 @@ After round 1 the parts worked on their own, but the chain still stopped halfway
 | Energy | Estimated from rated draw, not metered; no real switching | 60% |
 | Bookings | API, form, seed script; no calendar integration | 70% |
 | Dashboard | Auth, live state, demo panel | 85% |
-| Tests / CI | Emulator + pytest suites, Actions workflow | 85% |
+| Tests / CI | Emulator + pytest suites (including the HTTP endpoints), Actions workflow | 85% |
 
 About **80% of an MVP**, up from roughly 45% after round 1 and 25% at the start.
 
@@ -105,6 +124,13 @@ About **80% of an MVP**, up from roughly 45% after round 1 and 25% at the start.
 - **One warning per booking.** If an owner confirms and then leaves for the rest
   of the slot, the room is not re-checked. Fix: allow a new warning once the
   previous one is older than the grace period.
+- **Free-tier ceiling.** About 35 rooms on Firestore's Spark quota with
+  two dashboards open. Vercel Hobby's 4 hours of Active CPU a month is the
+  number to watch after the first real day. Hobby is also non-commercial
+  only, so a paying customer means Vercel Pro.
+- **The REST transport is untested.** Production talks to Firestore over
+  REST, but the emulator suite has to use gRPC, so the first real deploy is
+  the first run of that path.
 - **Push needs a client.** The backend sends FCM to `users/{uid}.fcmToken`, but
   nothing registers a token yet. Warnings show in the dashboard's "My bookings"
   instead. A small PWA with a service worker would close this.

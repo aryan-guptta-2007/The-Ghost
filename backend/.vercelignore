@@ -1,0 +1,5 @@
+# Only api/, lib/ and the core modules are needed at runtime.
+test/
+scripts/
+eslint.config.js
+.runtimeconfig.json

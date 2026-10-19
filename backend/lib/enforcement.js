@@ -1,7 +1,7 @@
-// functions/lib/enforcement.js
+// backend/lib/enforcement.js
 /*
-  The enforcement chain, shared by handleOccupancy (event-driven) and
-  sweepActiveBookings (time-driven):
+  The enforcement chain, shared by occupancy.js (each reading) and
+  sweep_active_bookings.js (the periodic sweep):
 
     flagGhost        booking is empty past its grace period
                      -> enforcement/{bookingId}   status 'warned'
@@ -9,7 +9,7 @@
                      -> FCM push to the booking owner (best effort)
     clearByPresence  a person shows up before the window closes
                      -> both docs move to 'cleared'
-    confirmAttendance / cancelUnconfirmedBookings close the loop.
+    POST /api/confirm and the reclaim job (cron) close the loop.
 
   Both docs are keyed by bookingId, so a booking is warned at most once no
   matter how many readings or sweeps notice it.

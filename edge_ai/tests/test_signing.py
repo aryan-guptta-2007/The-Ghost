@@ -2,7 +2,7 @@
 
 from metadata_sender import _canonical_json, build_payload
 
-# Same vector as functions/test/unit.test.js.
+# Same vector as backend/test/unit.test.js.
 VECTOR = "527f9fcaff60db95667dd447ae33fd1b11c6c6fc05e8b95ef6dc6f6d85d19964"
 
 

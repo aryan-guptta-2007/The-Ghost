@@ -3,12 +3,12 @@ rules_version = '2';
 // Ghost Resource Buster — Firestore security rules
 //
 // Clients read. Apart from two narrow self-service writes (cancelling your
-// own booking, registering your own FCM token), every write goes through a
-// Cloud Function using the Admin SDK, which bypasses these rules: readings
-// are HMAC-verified, bookings are overlap-checked, confirmations are tied
-// to an ID token.
+// own booking, registering your own FCM token), every write goes through the
+// backend API (backend/api/, on Vercel) using the Admin SDK, which bypasses
+// these rules: readings are HMAC-verified, bookings are overlap-checked,
+// confirmations are tied to an ID token.
 //
-// Roles are custom claims, set with functions/scripts/set-role.js:
+// Roles are custom claims, set with backend/scripts/set-role.js:
 //   admin  full read access
 //   demo   same read access, for the public demo login. It has no extra
 //          write power; the demo panel calls demoAction, which only touches
@@ -31,14 +31,17 @@ service cloud.firestore {
     }
 
     // ---- Rooms -------------------------------------------------------
-    // Anyone signed in can see rooms and their live reading.
+    // Anyone signed in can see rooms and their live reading. A room's
+    // lastReading is the only place sensor data is stored. Clients can
+    // never write it; otherwise anyone could forge "room is empty" and get
+    // someone else's booking cancelled.
     match /rooms/{roomId} {
       allow read:  if isSignedIn();
       allow write: if false;
     }
 
     // ---- Bookings ----------------------------------------------------
-    // Created only through the createBooking function (overlap check).
+    // Created only through POST /api/bookings (overlap check).
     // An owner may cancel their own booking and change nothing else.
     match /bookings/{bookingId} {
       allow read:   if isStaff() || isOwner(resource.data);
@@ -50,14 +53,6 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // ---- Occupancy ---------------------------------------------------
-    // Written only by receiveOccupancy after HMAC verification. A client
-    // write here could forge "room is empty" and cancel someone's booking.
-    match /occupancy/{occId} {
-      allow read:  if isStaff();
-      allow write: if false;
-    }
-
     // ---- Enforcement and confirmations -------------------------------
     match /enforcement/{bookingId} {
       allow read:  if isStaff();
@@ -65,7 +60,7 @@ service cloud.firestore {
     }
 
     // The owner reads their own warning; answering it goes through
-    // confirmAttendance, which checks their ID token.
+    // POST /api/confirm, which checks their ID token.
     match /confirmations/{bookingId} {
       allow read:  if isStaff() || isOwner(resource.data);
       allow write: if false;

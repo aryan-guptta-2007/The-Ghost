@@ -1,14 +1,14 @@
-// functions/sweep_active_bookings.js
+// backend/sweep_active_bookings.js
 /*
-  sweepActiveBookings (scheduled, every minute): the time-driven path.
+  The time-driven path, run by scheduler.js every few minutes.
 
-  handleOccupancy only runs when a reading arrives. A ghost booking often
+  Readings are judged as they arrive (occupancy.js). A ghost booking often
   produces no reading at all: the camera is dead, unplugged, or the room
   was never fitted. This sweep looks at every running booking and warns
   the owner if the room is
 
     vacant   lastReading.humanPresent == false
-    stale    lastReading older than STALE_SECONDS (edge heartbeat is 60s)
+    stale    lastReading older than STALE_SECONDS (edge heartbeat is 5 min)
     missing  the room has never reported
 
   It also marks bookings whose endTime has passed as 'completed', which
@@ -18,7 +18,6 @@
   JavaScript, because Firestore rejects range filters on two fields.
 */
 
-const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { db, Timestamp } = require('./lib/firebase');
 const { ACTIVE_STATUSES, STALE_SECONDS } = require('./lib/config');
 const { graceElapsed, flagGhost } = require('./lib/enforcement');
@@ -76,9 +75,4 @@ async function sweepActiveBookingsLogic(now = Timestamp.now()) {
   return result;
 }
 
-const sweepActiveBookings = onSchedule('every 1 minutes', async () => {
-  const result = await sweepActiveBookingsLogic();
-  console.log('[sweep] done', result);
-});
-
-module.exports = { sweepActiveBookings, sweepActiveBookingsLogic, ghostReason };
+module.exports = { sweepActiveBookingsLogic, ghostReason };
