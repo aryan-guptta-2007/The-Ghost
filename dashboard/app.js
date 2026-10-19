@@ -479,5 +479,10 @@ onAuthStateChanged(auth, async (user) => {
   // Countdowns tick every second without waiting for a snapshot.
   timers.push(setInterval(() => (render(), renderWarnings()), 1000));
   // The emulator has no Cloud Scheduler; run the sweep and reclaim jobs here.
-  if (LOCAL && staff) timers.push(setInterval(() => fetch('/api/tick', { method: 'POST' }).catch(() => {}), 10_000));
+  // schedulerTick exists only in the Functions emulator, so it is called there
+  // directly rather than through a Hosting rewrite that production would carry.
+  if (LOCAL && staff) {
+    const tickUrl = `http://127.0.0.1:5001/${config.projectId}/us-central1/schedulerTick`;
+    timers.push(setInterval(() => fetch(tickUrl, { method: 'POST' }).catch(() => {}), 10_000));
+  }
 });

@@ -26,5 +26,12 @@ module.exports = {
   cancelUnconfirmedBookings,  // Scheduled – reclaim the room, record energy saved
   createBooking,              // HTTP      – book a room (ID token, overlap-checked)
   demoAction,                 // HTTP      – camera-free demo controls (staff only)
-  schedulerTick,              // HTTP      – emulator-only stand-in for the scheduler
 };
+
+// The emulator does not run scheduled functions, so it gets an HTTP stand-in.
+// `firebase deploy` discovers functions by loading this file outside the
+// emulator, so schedulerTick is never created in a real project. The handler
+// also refuses to run outside the emulator, as a second line of defence.
+if (process.env.FUNCTIONS_EMULATOR === 'true') {
+  module.exports.schedulerTick = schedulerTick; // HTTP – emulator-only scheduler
+}

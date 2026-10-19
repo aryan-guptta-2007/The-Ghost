@@ -14,8 +14,7 @@
     "rewrites": [
       { "source": "/api/confirm", "function": { "functionId": "confirmAttendance" } },
       { "source": "/api/bookings", "function": { "functionId": "createBooking" } },
-      { "source": "/api/demo", "function": { "functionId": "demoAction" } },
-      { "source": "/api/tick", "function": { "functionId": "schedulerTick" } }
+      { "source": "/api/demo", "function": { "functionId": "demoAction" } }
     ]
   },
   "emulators": {

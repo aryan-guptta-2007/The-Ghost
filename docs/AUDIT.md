@@ -68,7 +68,7 @@ After round 1 the parts worked on their own, but the chain still stopped halfway
 | 26 | **New: every vacant reading failed its signature check.** Python serialises `0.0` as `"0.0"` and JavaScript as `"0"`. A vacant room reports exactly `0.0`, so the canonical JSON differed and the backend returned 401. I only found this by writing a cross-language test vector. | The edge normalises whole floats to ints and signs raw UTF-8. Both test suites assert the same signature. |
 | 27 | **New:** the "Reclaimed" card counted `status in ['resolved','canceled']`, but `resolved` meant a person *was* present, and the confirm path wrote `decision`, not `status`. | One status field per record (`warned → confirmed / cleared / reclaimed`) and counters maintained by the backend. |
 | 28 | **New:** the secret used deprecated `functions.config()`, and the SDKs were two majors behind. | `defineSecret('GHOST_HMAC_SECRET')` via Secret Manager. Upgraded to firebase-functions 7 (v2 API) and firebase-admin 14. |
-| 25 | No lint config, no tests, no CI, and `decision_logger.js` was imported by nothing. | ESLint flat config, 23 Node tests (most against the Firestore and Auth emulators), 7 pytest tests on the edge, and GitHub Actions running both. Every decision is now written through `decision_logger.js` and shown in the dashboard's decision log. |
+| 25 | No lint config, no tests, no CI, and `decision_logger.js` was imported by nothing. | ESLint flat config, 27 Node tests (most against the Firestore and Auth emulators), 7 pytest tests on the edge, and GitHub Actions running both. Every decision is now written through `decision_logger.js` and shown in the dashboard's decision log. |
 
 ### What the tests cover
 

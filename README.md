@@ -143,7 +143,7 @@ overlap-checked, confirmations need the owner's ID token. `audit_logs` and
 | Room reclaim + energy | Cancels, frees room, records kWh released | 90% |
 | Booking API | Overlap-checked API, booking form, seed script | 70% |
 | Dashboard | Login, roles, live state, demo panel | 85% |
-| Tests / CI | 23 Node tests (emulator + unit), 7 edge tests, GitHub Actions | 85% |
+| Tests / CI | 27 Node tests (emulator + unit), 7 edge tests, GitHub Actions | 85% |
 
 What's left, and why, is in [`docs/AUDIT.md`](docs/AUDIT.md#known-limitations).
 
