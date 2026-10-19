@@ -1,6 +1,6 @@
-// functions/cancel_unconfirmed_booking.js
+// backend/cancel_unconfirmed_booking.js
 /*
-  cancelUnconfirmedBookings (scheduled, every minute): the reclaim step.
+  The reclaim step, run by scheduler.js on every cron call (every minute).
 
   For every confirmation still 'pending' after expiresAt:
     - cancel the booking (if it is still running)
@@ -14,12 +14,10 @@
   instead of duplicating.
 */
 
-const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { db, FieldValue, Timestamp } = require('./lib/firebase');
 const { ACTIVE_STATUSES, DEFAULT_ROOM_KW, energySavedKwh } = require('./lib/config');
 const { statsRef } = require('./lib/enforcement');
 const { logDecision } = require('./decision_logger');
-
 
 /** Reclaims one expired confirmation. Returns the audit entry, or null. */
 async function reclaimOne(confirmationRef, now) {
@@ -116,9 +114,4 @@ async function cancelUnconfirmedBookingsLogic(now = Timestamp.now()) {
   return { expired: expired.size, reclaimed };
 }
 
-const cancelUnconfirmedBookings = onSchedule('every 1 minutes', async () => {
-  const result = await cancelUnconfirmedBookingsLogic();
-  console.log('[reclaim] done', result);
-});
-
-module.exports = { cancelUnconfirmedBookings, cancelUnconfirmedBookingsLogic };
+module.exports = { cancelUnconfirmedBookingsLogic };

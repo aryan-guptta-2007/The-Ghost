@@ -1,6 +1,6 @@
-// functions/confirm_attendance.js
+// backend/confirm_attendance.js
 /*
-  confirmAttendance (HTTP POST /api/confirm): the booking owner answers a
+  POST /api/confirm: the booking owner answers a
   ghost warning with "I'm here".
 
   Requires "Authorization: Bearer <Firebase ID token>". The caller must be
@@ -8,9 +8,8 @@
   Body: { "confirmationId": "<bookingId>" }
 */
 
-const { onRequest } = require('firebase-functions/v2/https');
 const { db, FieldValue, Timestamp } = require('./lib/firebase');
-const { HttpError, verifyBearer, sendError } = require('./lib/auth');
+const { HttpError } = require('./lib/auth');
 const { statsRef } = require('./lib/enforcement');
 const { logDecision } = require('./decision_logger');
 
@@ -27,7 +26,7 @@ async function confirmLogic(uid, confirmationId, now = Timestamp.now()) {
     if (data.userId !== uid) throw new HttpError(403, 'Not your booking');
     if (data.status !== 'pending') throw new HttpError(409, `Already ${data.status}`);
     if (data.expiresAt.toMillis() <= now.toMillis()) {
-      // Leave the state change to cancelUnconfirmedBookings so the reclaim
+      // Leave the state change to the reclaim job so the reclaim
       // and its audit entry stay in one place.
       throw new HttpError(410, 'Confirmation window has expired');
     }
@@ -44,17 +43,4 @@ async function confirmLogic(uid, confirmationId, now = Timestamp.now()) {
   return { success: true, confirmationId };
 }
 
-const confirmAttendance = onRequest({ cors: true }, async (req, res) => {
-  if (req.method !== 'POST') {
-    return res.status(405).send({ error: 'Method Not Allowed' });
-  }
-  try {
-    const token = await verifyBearer(req);
-    const result = await confirmLogic(token.uid, (req.body || {}).confirmationId);
-    return res.status(200).send(result);
-  } catch (err) {
-    return sendError(res, err, 'confirmAttendance');
-  }
-});
-
-module.exports = { confirmAttendance, confirmLogic };
+module.exports = { confirmLogic };

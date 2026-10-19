@@ -2,8 +2,10 @@
 /*
   Admin dashboard and "My bookings" page.
 
-  Config comes from Firebase Hosting's reserved /__/firebase/init.json, so
-  there are no keys to paste in. On localhost it talks to the emulators.
+  Firebase config comes from Hosting's reserved /__/firebase/init.json, so
+  there are no keys to paste in. The backend API runs on Vercel; its URL is
+  read from api-config.json. On localhost it talks to the emulators and the
+  local dev server instead.
 
   Rendering: each listener writes into `state`, and render() updates one
   keyed card per room with textContent only. No per-room queries, no
@@ -33,7 +35,6 @@ import {
 
 const LOCAL = ['localhost', '127.0.0.1'].includes(location.hostname);
 const EMULATOR_DEMO = { email: 'demo@ghost-buster.test', password: 'ghostdemo' };
-const STALE_MS = 3 * 60 * 1000; // matches STALE_SECONDS in functions/lib/config.js
 const RECENT_RECLAIM_MS = 10 * 60 * 1000;
 
 const $ = (id) => document.getElementById(id);
@@ -56,9 +57,18 @@ if (LOCAL) {
   connectFirestoreEmulator(db, '127.0.0.1', 8080);
 }
 
+// Where the API lives, and when a silent sensor counts as offline (must
+// match GHOST_STALE_SECONDS on the backend; the local demo uses 180).
+const apiConfig = LOCAL
+  ? { apiBase: 'http://127.0.0.1:5100/api', staleSeconds: 180 }
+  : await fetch('api-config.json').then((r) => (r.ok ? r.json() : {})).catch(() => ({}));
+const API_BASE = (apiConfig.apiBase || '').replace(/\/$/, '');
+const STALE_MS = (apiConfig.staleSeconds || 720) * 1000;
+
 async function api(path, body) {
+  if (!API_BASE) throw new Error('Set apiBase in dashboard/api-config.json to your Vercel URL');
   const token = await auth.currentUser.getIdToken();
-  const res = await fetch(`/api/${path}`, {
+  const res = await fetch(`${API_BASE}/${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
     body: JSON.stringify(body),
@@ -184,7 +194,7 @@ function stageFor(room, now) {
   const graceLeft = booking.startTime.toMillis() + grace * 1000 - now;
   if (graceLeft > 0) return { tone: 'info', icon: '◷', label: 'Grace period', detail: `${clock(graceLeft)} for the owner to arrive` };
   if (!silent && reading.humanPresent) return { tone: 'good', icon: '●', label: 'In use', detail: until };
-  return { tone: 'warning', icon: '?', label: 'Booked, looks empty', detail: 'Checked on the next sweep (every minute)' };
+  return { tone: 'warning', icon: '?', label: 'Booked, looks empty', detail: 'Checked on the next sensor reading or sweep' };
 }
 
 function readingText(room, now) {
@@ -478,11 +488,4 @@ onAuthStateChanged(auth, async (user) => {
   startListeners(user.uid);
   // Countdowns tick every second without waiting for a snapshot.
   timers.push(setInterval(() => (render(), renderWarnings()), 1000));
-  // The emulator has no Cloud Scheduler; run the sweep and reclaim jobs here.
-  // schedulerTick exists only in the Functions emulator, so it is called there
-  // directly rather than through a Hosting rewrite that production would carry.
-  if (LOCAL && staff) {
-    const tickUrl = `http://127.0.0.1:5001/${config.projectId}/us-central1/schedulerTick`;
-    timers.push(setInterval(() => fetch(tickUrl, { method: 'POST' }).catch(() => {}), 10_000));
-  }
 });

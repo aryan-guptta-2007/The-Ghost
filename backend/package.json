@@ -1,0 +1,27 @@
+{
+  "name": "ghost-resource-buster-backend",
+  "version": "0.3.0",
+  "description": "Ghost Resource Buster API: Vercel serverless functions on top of Firebase (Spark plan)",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "test": "firebase emulators:exec --only firestore,auth --project demo-ghost-buster \"node --test --test-concurrency=1 test/*.test.js\"",
+    "test:unit": "node --test test/unit.test.js",
+    "dev": "firebase emulators:exec --only auth,firestore,hosting --project demo-ghost-buster --ui \"node scripts/dev-server.js\"",
+    "demo": "firebase emulators:exec --only auth,firestore,hosting --project demo-ghost-buster --ui \"node scripts/demo.js\"",
+    "seed": "node scripts/seed.js",
+    "simulate": "node scripts/simulate.js",
+    "set-role": "node scripts/set-role.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^14.5.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.13.0",
+    "globals": "^17.13.0"
+  },
+  "private": true
+}

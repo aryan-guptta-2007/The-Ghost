@@ -42,8 +42,11 @@ from metadata_sender import send_room_metadata
 DEVICE_ID = os.getenv("DEVICE_ID", "edge_cam_01")
 ROOM_ID = os.getenv("ROOM_ID", "room_unknown")
 # Resend current state at least this often, so the backend can tell
-# "genuinely vacant" apart from "edge device died".
-HEARTBEAT_SECONDS = int(os.getenv("GHOST_HEARTBEAT_SECONDS", "60"))
+# "genuinely vacant" apart from "edge device died". Five minutes keeps a
+# room at ~290 Firestore writes a day (free tier: 20,000); the backend
+# treats a device as silent after 12 minutes (GHOST_STALE_SECONDS).
+# State changes are still sent immediately.
+HEARTBEAT_SECONDS = int(os.getenv("GHOST_HEARTBEAT_SECONDS", "300"))
 MAX_ATTEMPTS = int(os.getenv("GHOST_MAX_ATTEMPTS", "5"))
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "pending_payloads.db")

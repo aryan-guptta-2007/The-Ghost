@@ -3,7 +3,17 @@
 const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
 const { canonicalJson, sign, verifySignature } = require('../lib/hmac');
-const { policyFor, energySavedKwh, GRACE_SECONDS, CONFIRM_WINDOW_SECONDS } = require('../lib/config');
+const {
+  policyFor,
+  energySavedKwh,
+  hmacSecret,
+  cronSecret,
+  GRACE_SECONDS,
+  CONFIRM_WINDOW_SECONDS,
+  STALE_SECONDS,
+  SWEEP_EVERY_MINUTES,
+} = require('../lib/config');
+const { sweepDue } = require('../scheduler');
 const { ghostReason } = require('../sweep_active_bookings');
 const { Timestamp } = require('../lib/firebase');
 
@@ -78,11 +88,54 @@ describe('ghostReason', () => {
   test('missing, stale and vacant rooms are ghosts', () => {
     assert.match(ghostReason(null, now), /No occupancy data/);
     assert.match(ghostReason({}, now), /No occupancy data/);
-    assert.match(ghostReason(reading(400, true), now), /silent for 400s/);
+    assert.match(ghostReason(reading(STALE_SECONDS + 60, true), now), new RegExp(`silent for ${STALE_SECONDS + 60}s`));
     assert.equal(ghostReason(reading(30, false), now), 'Room reads vacant');
   });
 
   test('a fresh occupied reading is not', () => {
     assert.equal(ghostReason(reading(30, true), now), null);
+  });
+});
+
+describe('free-tier defaults', () => {
+  test('a device is silent after 12 minutes and the sweep runs every 5th minute', () => {
+    assert.equal(STALE_SECONDS, 12 * 60);
+    assert.equal(SWEEP_EVERY_MINUTES, 5);
+    const at = (minute) => Timestamp.fromMillis(minute * 60_000 + 7_000);
+    assert.deepEqual([0, 1, 2, 3, 4, 5].map((m) => sweepDue(at(m))), [true, false, false, false, false, true]);
+  });
+});
+
+describe('secrets', () => {
+  const saved = { ...process.env };
+  const restore = () => {
+    for (const k of ['FIRESTORE_EMULATOR_HOST', 'GHOST_HMAC_SECRET', 'CRON_SECRET']) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  };
+
+  test('a real deployment without secrets fails closed instead of using dev values', () => {
+    delete process.env.FIRESTORE_EMULATOR_HOST;
+    delete process.env.GHOST_HMAC_SECRET;
+    delete process.env.CRON_SECRET;
+    try {
+      assert.throws(hmacSecret, /GHOST_HMAC_SECRET is not set/);
+      assert.throws(cronSecret, /CRON_SECRET is not set/);
+    } finally {
+      restore();
+    }
+  });
+
+  test('the emulator gets fixed dev secrets, and env vars always win', () => {
+    process.env.FIRESTORE_EMULATOR_HOST = '127.0.0.1:8080';
+    delete process.env.GHOST_HMAC_SECRET;
+    try {
+      assert.equal(hmacSecret(), 'local-dev-secret');
+      process.env.GHOST_HMAC_SECRET = 'from-env';
+      assert.equal(hmacSecret(), 'from-env');
+    } finally {
+      restore();
+    }
   });
 });

@@ -4,8 +4,12 @@
 .firebaserc
 serviceAccountKey.json
 *-firebase-adminsdk-*.json
-functions/.runtimeconfig.json
-functions/.secret.local
+*service-account*.json
+.env*.local
+backend/.runtimeconfig.json
+
+# Vercel CLI link and pulled env files
+.vercel/
 
 # Runtime artifacts
 edge_ai/pending_payloads.db

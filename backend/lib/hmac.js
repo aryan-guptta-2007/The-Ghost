@@ -1,5 +1,5 @@
-// functions/lib/hmac.js
-// Signature helpers shared by receiveOccupancy and the simulator.
+// backend/lib/hmac.js
+// Signature helpers shared by POST /api/occupancy and the simulator.
 
 const crypto = require('crypto');
 
