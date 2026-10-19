@@ -14,11 +14,15 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@v4
+      # Same source of truth as Vercel: engines.node in backend/package.json.
+      # npm test also runs with require(esm) disabled, the strictest loader,
+      # so code that only works on lenient Node builds fails here, not in prod.
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: backend/package.json
           cache: npm
           cache-dependency-path: backend/package-lock.json
+      - run: node --version
       - uses: actions/setup-java@v4
         with:
           distribution: temurin

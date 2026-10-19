@@ -101,6 +101,13 @@ I found one bug along the way. `preferRest` (REST instead of gRPC, for faster
 cold starts) makes the Admin SDK ignore `FIRESTORE_EMULATOR_HOST` and look for
 real credentials. Production uses REST; the emulator keeps gRPC.
 
+### First deploy: two production-only failures
+
+| What broke | Fix |
+|---|---|
+| **Every function crashed on Vercel with `ERR_REQUIRE_ESM`.** firebase-admin 14 verifies ID tokens through `jwks-rsa` 4, which `require()`s the ESM-only `jose` 6. My Node 22.17 and CI allow `require()` of ES modules, so the tests passed; Vercel's runtime did not. | Pinned firebase-admin to 13.10 (`jwks-rsa` 3 → `jose` 4, which ships CommonJS), with a `uuid` override to clear an advisory that comes with it. The tests now run with `--no-experimental-require-module`, and a runtime test loads each function in a fresh process. I confirmed that test fails with firebase-admin 14. CI reads its Node version from `engines.node`, as Vercel does. |
+| **Functions ran in Washington, D.C. (`iad1`) while Firestore is in Mumbai.** Vercel logged "Received in bom1, Routed to iad1": the request entered Vercel's network near the caller, then crossed to the default function region. Every Firestore round trip paid the US–India distance. | `"regions": ["bom1"]` in `backend/vercel.json`, so the region is part of every deploy rather than a dashboard setting. A cold-start log line prints the Node version and region actually used. |
+
 ## Where it stands
 
 | Layer | State | Done |

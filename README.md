@@ -154,7 +154,7 @@ overlap-checked, confirmations need the owner's ID token. `audit_logs` and
 | Room reclaim + energy | Cancels, frees room, records kWh released | 90% |
 | Booking API | Overlap-checked API, booking form, seed script | 70% |
 | Dashboard | Login, roles, live state, demo panel | 85% |
-| Tests / CI | 33 Node tests (emulator + unit), 7 edge tests, GitHub Actions | 85% |
+| Tests / CI | 39 Node tests (emulator + unit + runtime), 7 edge tests, GitHub Actions | 85% |
 
 What's left, and why, is in [`docs/AUDIT.md`](docs/AUDIT.md#known-limitations).
 
@@ -189,7 +189,12 @@ GitHub. Steps marked 🔑 need you to sign in; nothing here asks for a card.
 
 1. 🔑 On [vercel.com](https://vercel.com), **Add New → Project**, import this
    GitHub repo, and set **Root Directory** to `backend`. No build command is
-   needed.
+   needed. Under **Settings → Build and Deployment → Node.js Version**, choose
+   **22.x**. (`engines.node` in `backend/package.json` already forces 22.x and
+   wins over this setting; matching it just avoids confusion.) The function
+   region is set to Mumbai (`bom1`) in `backend/vercel.json`, next to a
+   Firestore database in `asia-south1`. Change it there if your database is
+   elsewhere.
 2. Under **Settings → Environment Variables**, add these for the
    **Production** environment only. Keeping them out of Preview means a
    branch build can't read your admin key.
@@ -337,6 +342,12 @@ The emulator suite covers the ghost path, the confirm path (with real ID
 tokens), presence clearing a warning, replay and forgery, devices going
 offline, booking overlaps, the demo permissions, and the Vercel endpoints
 themselves: cron secret, CORS allowlist, and method and status mapping.
+
+Tests run with `--no-experimental-require-module`, and `test/runtime.test.js`
+loads every function in a fresh process the way Vercel does. Code that
+`require()`s an ES module, which works on some Node builds and crashes on
+others, fails CI instead of production. CI takes its Node version from
+`engines.node`, the same field Vercel uses.
 
 ---
 
