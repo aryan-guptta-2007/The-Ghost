@@ -1,115 +1,124 @@
 // functions/cancel_unconfirmed_booking.js
 /*
-  Firebase Cloud Function: Cancel unconfirmed bookings (scheduled)
-  ----------------------------------------------------------------
-  Finds `confirmations` documents still 'pending' whose `expiresAt` has
-  passed, cancels the linked booking, releases the room back to the pool,
-  and writes an audit log.
+  cancelUnconfirmedBookings (scheduled, every minute): the reclaim step.
 
-  FIXES APPLIED vs. the original version:
-   1. Firestore transactions require ALL reads before ANY writes. The
-      original called tx.update(confirmationRef, ...) and only then
-      tx.get(bookingRef) — that throws at runtime. Reads are now hoisted.
-   2. writeAuditLog() did a non-transactional db.collection().add() from
-      INSIDE the transaction. Transactions retry on contention, so that
-      produced duplicate audit rows and broke the idempotency the comments
-      claimed. The audit write is now a tx.set() with a deterministic ID.
-   3. An unused db.batch() was created and never committed — removed.
-   4. Cancelling a booking did not free the room. The room is now flipped
-      back to available, which is the actual product value.
+  For every confirmation still 'pending' after expiresAt:
+    - cancel the booking (if it is still running)
+    - mark the enforcement record 'reclaimed'
+    - write audit_logs/ghost_{bookingId} with the energy saved, computed as
+      the room's power draw x the booking time that was left
+    - bump the dashboard counters in stats/global
+
+  All reads happen before any write (Firestore transaction rule), and the
+  audit doc has a deterministic ID, so a retried transaction overwrites
+  instead of duplicating.
 */
 
-const functions = require('firebase-functions');
-const { admin, db } = require('./lib/firebase');
+const { onSchedule } = require('firebase-functions/v2/scheduler');
+const { db, FieldValue, Timestamp } = require('./lib/firebase');
+const { ACTIVE_STATUSES, DEFAULT_ROOM_KW, energySavedKwh } = require('./lib/config');
+const { statsRef } = require('./lib/enforcement');
+const { logDecision } = require('./decision_logger');
 
-const SCHEDULE = 'every 1 minutes';
 
-exports.cancelUnconfirmedBookings = functions.pubsub
-  .schedule(SCHEDULE)
-  .onRun(async () => {
-    const now = admin.firestore.Timestamp.now();
+/** Reclaims one expired confirmation. Returns the audit entry, or null. */
+async function reclaimOne(confirmationRef, now) {
+  return db.runTransaction(async (tx) => {
+    // ---------- ALL READS FIRST ----------
+    const conf = await tx.get(confirmationRef);
+    if (!conf.exists || conf.get('status') !== 'pending') return null;
 
-    const expiredSnap = await db
-      .collection('confirmations')
-      .where('status', '==', 'pending')
-      .where('expiresAt', '<=', now)
-      .limit(100) // bound the work per run
-      .get();
+    const { bookingId, roomId } = conf.data();
+    const bookingRef = db.collection('bookings').doc(bookingId);
+    const roomRef = db.collection('rooms').doc(roomId);
+    const enforcementRef = db.collection('enforcement').doc(bookingId);
+    const [booking, room, enforcement] = await tx.getAll(bookingRef, roomRef, enforcementRef);
 
-    if (expiredSnap.empty) {
-      console.log('No expired confirmations at this run.');
-      return null;
+    // ---------- THEN ALL WRITES ----------
+    tx.update(confirmationRef, { status: 'expired', resolvedAt: now });
+
+    const stillRunning =
+      booking.exists &&
+      ACTIVE_STATUSES.includes(booking.get('status')) &&
+      booking.get('endTime').toMillis() > now.toMillis();
+
+    const powerKw = (room.exists && room.get('powerKw')) || DEFAULT_ROOM_KW;
+    const remainingMs = stillRunning ? booking.get('endTime').toMillis() - now.toMillis() : 0;
+    const kwh = energySavedKwh(powerKw, remainingMs);
+
+    if (stillRunning) {
+      tx.update(bookingRef, {
+        status: 'canceled',
+        cancelledAt: now,
+        cancelReason: 'ghost_reclaimed',
+      });
+      tx.set(roomRef, { lastReclaimAt: now }, { merge: true });
+      tx.set(
+        statsRef(),
+        {
+          roomsReclaimed: FieldValue.increment(1),
+          energySavedKwh: FieldValue.increment(kwh),
+          minutesReclaimed: FieldValue.increment(Math.round(remainingMs / 60000)),
+        },
+        { merge: true }
+      );
+    }
+    if (enforcement.exists) {
+      tx.update(enforcementRef, {
+        status: stillRunning ? 'reclaimed' : 'expired',
+        resolvedAt: now,
+      });
     }
 
-    let reclaimed = 0;
-
-    for (const doc of expiredSnap.docs) {
-      const confirmationRef = doc.ref;
-      const { bookingId, roomId } = doc.data();
-
-      try {
-        await db.runTransaction(async (tx) => {
-          // ---------- ALL READS FIRST ----------
-          const freshSnap = await tx.get(confirmationRef);
-          const fresh = freshSnap.data();
-
-          // Already handled by a concurrent run — idempotent no-op.
-          if (!fresh || fresh.status !== 'pending') return;
-
-          const bookingRef = bookingId
-            ? db.collection('bookings').doc(bookingId)
-            : null;
-          const bookingSnap = bookingRef ? await tx.get(bookingRef) : null;
-
-          const roomRef = roomId ? db.collection('rooms').doc(roomId) : null;
-
-          // ---------- THEN ALL WRITES ----------
-          tx.update(confirmationRef, {
-            status: 'expired',
-            processedAt: now,
-          });
-
-          let cancelled = false;
-          if (bookingSnap && bookingSnap.exists) {
-            const status = bookingSnap.get('status');
-            if (status !== 'canceled' && status !== 'completed') {
-              tx.update(bookingRef, {
-                status: 'canceled',
-                cancelledAt: now,
-                cancelReason: 'ghost_reclaimed',
-              });
-              cancelled = true;
-            }
-          }
-
-          // Release the room so someone else can book the slot.
-          if (roomRef && cancelled) {
-            tx.set(
-              roomRef,
-              { available: true, releasedAt: now, releasedBy: 'ghost_buster' },
-              { merge: true }
-            );
-          }
-
-          // Deterministic audit ID => transaction retries overwrite rather
-          // than duplicate.
-          const auditRef = db.collection('audit_logs').doc(`ghost_${doc.id}`);
-          tx.set(auditRef, {
-            action: 'ghost_reclaimed',
-            bookingId: bookingId || null,
-            roomId: roomId || null,
-            confirmationId: doc.id,
-            bookingCancelled: cancelled,
-            timestamp: now,
-            source: 'cancel_unconfirmed_booking',
-          });
-        });
-        reclaimed += 1;
-      } catch (err) {
-        console.error(`Failed to process confirmation ${doc.id}:`, err);
-      }
-    }
-
-    console.log(`Processed ${reclaimed}/${expiredSnap.size} expired confirmations.`);
-    return null;
+    const audit = {
+      action: stillRunning ? 'ghost_reclaimed' : 'warning_expired',
+      bookingId,
+      roomId,
+      confirmationId: conf.id,
+      bookingCancelled: stillRunning,
+      remainingMinutes: Math.round(remainingMs / 60000),
+      powerKw,
+      energySavedKwh: kwh,
+      timestamp: now,
+      source: 'cancel_unconfirmed_booking',
+    };
+    tx.set(db.collection('audit_logs').doc(`ghost_${bookingId}`), audit);
+    return audit;
   });
+}
+
+async function cancelUnconfirmedBookingsLogic(now = Timestamp.now()) {
+  const expired = await db
+    .collection('confirmations')
+    .where('status', '==', 'pending')
+    .where('expiresAt', '<=', now)
+    .limit(100) // bound the work per run
+    .get();
+
+  let reclaimed = 0;
+  for (const doc of expired.docs) {
+    try {
+      const audit = await reclaimOne(doc.ref, now);
+      if (audit && audit.bookingCancelled) {
+        reclaimed += 1;
+        await logDecision(
+          'ReclaimAgent',
+          'reclaimed',
+          `No confirmation; released ${audit.remainingMinutes} min, saved ${audit.energySavedKwh} kWh`,
+          audit.roomId,
+          audit.bookingId
+        );
+      }
+    } catch (err) {
+      console.error(`Failed to process confirmation ${doc.id}:`, err);
+    }
+  }
+  return { expired: expired.size, reclaimed };
+}
+
+const cancelUnconfirmedBookings = onSchedule('every 1 minutes', async () => {
+  const result = await cancelUnconfirmedBookingsLogic();
+  console.log('[reclaim] done', result);
+});
+
+module.exports = { cancelUnconfirmedBookings, cancelUnconfirmedBookingsLogic };

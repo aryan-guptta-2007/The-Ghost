@@ -3,37 +3,102 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Ghost Resource Buster – Admin Dashboard</title>
+  <title>Ghost Resource Buster</title>
+  <meta name="description" content="Reclaims booked-but-empty rooms using on-device presence detection." />
   <link rel="stylesheet" href="style.css" />
-  <!-- Firebase SDKs (App, Firestore) -->
-  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+  <script type="module" src="app.js"></script>
 </head>
 <body>
-  <header>
-    <h1>Ghost Resource Buster – Admin Dashboard</h1>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">◌</span>
+      <span>Ghost Resource Buster</span>
+    </div>
+    <div class="who" id="who" hidden>
+      <span id="who-email"></span>
+      <span class="role" id="who-role"></span>
+      <button type="button" class="ghost-btn" id="sign-out">Sign out</button>
+    </div>
   </header>
 
-  <section id="summary">
-    <div class="card" id="ghost-count">
-      <h2>Ghost Violations</h2>
-      <p class="value" id="ghost-violations">0</p>
-    </div>
-    <div class="card" id="reclaimed-count">
-      <h2>Reclaimed Resources</h2>
-      <p class="value" id="reclaimed-resources">0</p>
-    </div>
-    <div class="card" id="energy-savings">
-      <h2>Energy Savings</h2>
-      <p class="value" id="energy-kwh">0 kWh</p>
-    </div>
-  </section>
+  <!-- ---------- Sign in ---------- -->
+  <main id="login-view" class="login" hidden>
+    <form id="login-form" class="panel login-card">
+      <h1>Sign in</h1>
+      <p class="muted">Rooms that are booked but empty get a warning, then get released.</p>
+      <label>Email <input type="email" id="login-email" autocomplete="username" required /></label>
+      <label>Password <input type="password" id="login-password" autocomplete="current-password" required /></label>
+      <button type="submit" class="primary">Sign in</button>
+      <button type="button" class="secondary" id="demo-login" hidden>Use the demo account</button>
+      <p class="error" id="login-error" role="alert"></p>
+    </form>
+  </main>
 
-  <section id="rooms">
-    <h2>Room Status</h2>
-    <ul id="room-list"></ul>
-  </section>
+  <!-- ---------- App ---------- -->
+  <main id="app-view" hidden>
+    <!-- Warnings for the signed-in user's own bookings -->
+    <section id="my-warnings" class="warnings" aria-live="polite"></section>
 
-  <script src="app.js"></script>
+    <section id="staff" hidden>
+      <div class="stats">
+        <div class="stat hero">
+          <div class="stat-label">Energy saved</div>
+          <div class="stat-value"><span id="stat-energy">0</span><span class="unit">kWh</span></div>
+          <div class="stat-note" id="stat-energy-note">Power draw × booking time released</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Ghost bookings flagged</div>
+          <div class="stat-value" id="stat-flagged">0</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Rooms reclaimed</div>
+          <div class="stat-value" id="stat-reclaimed">0</div>
+          <div class="stat-note" id="stat-hours"></div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Warnings answered</div>
+          <div class="stat-value" id="stat-answered">0</div>
+          <div class="stat-note">Owner confirmed or person detected</div>
+        </div>
+      </div>
+
+      <div class="section-head">
+        <h2>Rooms</h2>
+        <p class="muted" id="demo-hint" hidden>
+          Demo: <b>Book now</b> starts a booking with a 30-second grace period, then
+          <b>Empty</b> makes the room read vacant. The owner is warned and has 60 seconds
+          to answer before the room is released.
+        </p>
+      </div>
+      <ul id="room-grid" class="room-grid"></ul>
+
+      <div class="section-head"><h2>Decision log</h2></div>
+      <ol id="feed" class="feed panel"></ol>
+    </section>
+
+    <section class="mine">
+      <div class="section-head"><h2>My bookings</h2></div>
+      <div class="mine-grid">
+        <form id="book-form" class="panel book-form">
+          <h3>Book a room</h3>
+          <label>Room <select id="book-room" required></select></label>
+          <label>Start <input type="datetime-local" id="book-start" required /></label>
+          <label>Length
+            <select id="book-length">
+              <option value="30">30 min</option>
+              <option value="60" selected>1 hour</option>
+              <option value="90">1.5 hours</option>
+              <option value="120">2 hours</option>
+            </select>
+          </label>
+          <button type="submit" class="primary">Book</button>
+          <p class="error" id="book-error" role="alert"></p>
+        </form>
+        <ul id="my-bookings" class="panel my-bookings"></ul>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" hidden></div>
 </body>
 </html>

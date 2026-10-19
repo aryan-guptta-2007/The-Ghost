@@ -1,7 +1,6 @@
 {
   "indexes": [
     {
-      "_comment": "cancelUnconfirmedBookings: status equality + expiresAt range",
       "collectionGroup": "confirmations",
       "queryScope": "COLLECTION",
       "fields": [
@@ -10,7 +9,6 @@
       ]
     },
     {
-      "_comment": "handleOccupancy: active booking lookup for a room",
       "collectionGroup": "bookings",
       "queryScope": "COLLECTION",
       "fields": [
@@ -20,21 +18,27 @@
       ]
     },
     {
-      "_comment": "dashboard: latest occupancy reading per room",
-      "collectionGroup": "occupancy",
+      "collectionGroup": "bookings",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "roomId", "order": "ASCENDING" },
-        { "fieldPath": "timestamp", "order": "DESCENDING" }
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "startTime", "order": "ASCENDING" }
       ]
     },
     {
-      "_comment": "confirmAttendance: find enforcement doc for a booking",
-      "collectionGroup": "enforcement",
+      "collectionGroup": "bookings",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "bookingId", "order": "ASCENDING" },
-        { "fieldPath": "decision", "order": "ASCENDING" }
+        { "fieldPath": "userId", "order": "ASCENDING" },
+        { "fieldPath": "startTime", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "confirmations",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "userId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" }
       ]
     }
   ],

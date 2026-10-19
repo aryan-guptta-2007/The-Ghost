@@ -1,18 +1,19 @@
 // functions/lib/firebase.js
 // Single shared Firebase Admin initialisation.
 //
-// WHY THIS EXISTS:
-// Cloud Functions loads every exported module into the SAME Node process.
-// Calling admin.initializeApp() in more than one file throws
-// "The default Firebase app already exists". Every function module must
-// import the app/db from here instead of initialising its own.
+// Cloud Functions loads every exported module into the same Node process,
+// and initialising the default app twice throws. Every module imports the
+// db and helpers from here instead of initialising its own.
 
-const admin = require('firebase-admin');
+const { initializeApp, getApps } = require('firebase-admin/app');
+const { getFirestore, FieldValue, Timestamp } = require('firebase-admin/firestore');
+const { getAuth } = require('firebase-admin/auth');
+const { getMessaging } = require('firebase-admin/messaging');
 
-if (!admin.apps.length) {
-  admin.initializeApp();
+if (!getApps().length) {
+  initializeApp();
 }
 
-const db = admin.firestore();
+const db = getFirestore();
 
-module.exports = { admin, db };
+module.exports = { db, FieldValue, Timestamp, getAuth, getMessaging };

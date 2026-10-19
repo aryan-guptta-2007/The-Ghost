@@ -1,173 +1,137 @@
-# Technical Audit — Ghost Resource Buster
+# Engineering log
 
-A candid assessment of the codebase as submitted, the fixes applied, and what
-remains before this is a product rather than a prototype.
+I built the first version of Ghost Resource Buster quickly, and when I went back
+through it line by line, it could not complete a single detect → warn → reclaim
+cycle. The architecture held up. The wiring between the pieces did not. This is
+the record of what I found, how I fixed it, and what is still open.
 
-**Verdict:** the architecture is sound and the backend skeleton is genuinely
-well-reasoned. But the system could not run end to end. The single most
-important thing — detecting whether a human is in the room — was never
-implemented, and several files had never been executed even once.
+Defect numbers are stable, so commits and issues can refer to them.
 
 ---
 
-## 1. What this project is
-
-A system that reclaims **ghost bookings**: rooms reserved by someone who never
-shows up. In a university with 60 classrooms, 15–25% of bookings are typically
-no-shows, and each empty room keeps burning ~4.3 kW of AC and lighting.
-
-The flow as designed:
+## The flow
 
 ```
 Camera (edge device)
-   -> detect human presence locally, discard the image
-   -> POST signed {room, occupied?, confidence} to backend
-        -> booking is active but room is empty past grace period?
-             -> push notification: "confirm within 5 minutes"
-                  -> confirmed  -> cancel enforcement, do nothing
-                  -> ignored    -> cancel booking, free the room, cut power
+   -> detect a person locally, discard the frame
+   -> POST signed {room, occupied?, confidence} to receiveOccupancy
+        -> booking running, room empty past its grace period?
+             -> warn the owner (push + dashboard), open a confirmation window
+                  -> owner confirms, or a person walks in -> stand down
+                  -> nobody answers  -> cancel booking, free the room,
+                                        record the energy saved
 ```
 
-The privacy design is the strongest idea here: no image ever leaves the room.
-Only a boolean and a confidence score are transmitted. That is a real
-differentiator and worth leading with.
+The part I am most sure of is the privacy design. No frame ever leaves the room,
+only a boolean and a confidence score. Everything else is built around that.
 
 ---
 
-## 2. Blocking defects found
+## Round 1: making it run at all
 
-Ranked by severity. Items marked **[FIXED]** are corrected in this repo.
+The first version could not detect anyone, could not deploy, and its edge and
+backend could not talk to each other.
 
-### Critical — system could not function
-
-| # | Defect | Impact |
-|---|--------|--------|
-| 1 | **No presence detection existed.** `orchestrator.py` computed `status = "occupied" if shape else "vacant"`. `shape` is a dimension tuple — always truthy. | Every room reported "occupied" forever. **No ghost booking could ever be detected.** The product had no product. **[FIXED]** — added `human_presence.py` |
-| 2 | **`camera_capture.py` discarded every frame**, yielding only `(timestamp, id, shape)`. | Detection was impossible downstream even if written. **[FIXED]** |
-| 3 | **`receiveOccupancy` endpoint never existed.** The edge device POSTed to it and signed every payload with HMAC. | Edge → backend chain fully broken; the HMAC signature was generated but verified nowhere. **[FIXED]** — added `receive_occupancy.js` |
-| 4 | **`admin.initializeApp()` called in 5 separate files.** Cloud Functions loads all modules into one process. | Deploy crashes with *"The default Firebase app already exists"*. **[FIXED]** — single `lib/firebase.js` |
-| 5 | **No barrel `index.js`.** Only `handleOccupancy` was exported. | `confirmAttendance`, `sendLateArrivalWarning`, `cancelUnconfirmedBookings` were written but **would never deploy**. **[FIXED]** |
-| 6 | **Schema mismatch.** Edge sent `room_id` / `status:"occupied"` / float timestamp. Backend read `roomId` / `humanPresent:bool` / Firestore Timestamp. | Silent total failure at the boundary. **[FIXED]** — normalisation layer in `receive_occupancy.js` |
-| 7 | **No `package.json`, `requirements.txt`, `firebase.json`, `firestore.rules`, or indexes.** | Nothing could be installed, deployed, or secured. **[FIXED]** |
-| 8 | **`energy_controller.py` ended with a stray ` ``` ` markdown fence** (line 175). | File was not valid Python. Strong evidence it was never run. **[FIXED]** |
-
-### High — runtime errors and security holes
-
-| # | Defect | Impact |
-|---|--------|--------|
-| 9 | **Firestore transaction wrote before reading** in `cancel_unconfirmed_booking.js` (`tx.update` then `tx.get`). | Throws at runtime. Firestore mandates all reads before any writes. **[FIXED]** |
-| 10 | **Non-transactional `.add()` inside a transaction** (`writeAuditLog`). Transactions retry on contention. | Duplicate audit entries — destroying the idempotency the comments claimed. **[FIXED]** — deterministic doc IDs |
-| 11 | **`confirmAttendance` is an unauthenticated public HTTP endpoint.** The `userId` check only fires if the *caller* supplies it. | Anyone with a confirmationId can confirm someone else's attendance and defeat enforcement. **[OPEN — see §4]** |
-| 12 | **No replay protection on HMAC.** No nonce, no freshness check. | A captured "occupied" payload could be replayed indefinitely to keep a ghost booking alive. **[PARTIALLY FIXED]** — 5-minute freshness window added; nonce still needed |
-| 13 | **Firestore query with range filters on two different fields** (`startTime <=` and `endTime >=`) in `handleOccupancy`. | Query rejected by Firestore. **[OPEN — see §4]** |
-| 14 | **Enforcement is event-driven, not time-driven.** It only fires when an occupancy doc arrives. | If the edge device dies or the room is empty and sends nothing, **no enforcement ever happens** — the exact failure case the product exists to catch. **[OPEN — architectural, see §4]** |
-| 15 | **Single-frame verdict, no debounce.** One bad frame flagged a real occupant as a ghost. | Unacceptable false-accusation rate. **[FIXED]** — N-of-M sliding window in `PresenceDetector` |
-| 16 | **`time.sleep(backoff)` inside the capture loop.** | Froze all detection for up to 60s during network trouble. **[FIXED]** — wall-clock scheduled retries |
-| 17 | **Payloads silently deleted after 5 attempts.** | Data loss with no audit trail. **[FIXED]** — dead-letter table |
-
-### Medium — dashboard and data integrity
-
-| # | Defect | Impact |
-|---|--------|--------|
-| 18 | **Energy card can never show a number.** `app.js` reads `audit_logs` where `type == 'energy_savings'`, field `wh`. `energy_controller.py` writes `event: 'energy_savings'`, field `saved_watt_hours`, to a *local file*. Three mismatches. | Always `0 kWh`. **[OPEN]** |
-| 19 | **`energy_controller.py` is never called by anything.** No import, no invocation. | Dead code. The energy-saving claim is unsubstantiated. **[OPEN]** |
-| 20 | **Dashboard has no authentication at all.** Firebase config placeholders + direct client Firestore reads. | An "admin" dashboard readable by the entire internet. **[MITIGATED]** by the new `firestore.rules`, but the login UI is still missing. |
-| 21 | **N+1 query with a render race.** `list.innerHTML = ''` then async `.then()` appends per room. | Duplicated and out-of-order room cards on every snapshot. **[OPEN]** |
-| 22 | **Energy savings arithmetic is wrong.** `_record_savings` measures the *active* period duration and reports it as idle savings. | Inverted metric — reports savings for time the room was occupied. **[OPEN]** |
-| 23 | **No booking creation path exists.** The whole system assumes a `bookings` collection with no way to populate it. | Cannot be demoed end to end. **[OPEN]** |
-| 24 | **Chain is broken between functions.** Nothing calls `sendLateArrivalWarning`. `handleOccupancy` writes `enforcement: pending` and stops. `decision_logger.js` is imported by nobody. | detect → warn → confirm → cancel has a missing middle. **[OPEN]** |
-| 25 | **Zero tests, no CI, no README, no LICENSE.** | **[FIXED]** for docs/scaffolding; tests still needed. |
+| # | What I found | Fix |
+|---|---|---|
+| 1 | **There was no presence detection.** `orchestrator.py` computed `"occupied" if shape else "vacant"`, and `shape` is always truthy. Every room was "occupied" forever. | Wrote `human_presence.py`: MediaPipe pose with an OpenCV HOG fallback, plus a 7-of-10 frame debounce. Tuning notes are in [`BENCHMARK.md`](BENCHMARK.md). |
+| 2 | `camera_capture.py` dropped every frame and yielded only its shape. | It now yields the frame in memory. Frames are still never written or sent. |
+| 3 | The `receiveOccupancy` endpoint the edge posted to did not exist, so the HMAC signature was verified nowhere. | Wrote `receive_occupancy.js`. |
+| 4 | `admin.initializeApp()` was called in five files, which crashes a Functions deploy. | One shared `lib/firebase.js`. |
+| 5 | `index.js` exported only `handleOccupancy`, so three functions never deployed. | A barrel `index.js`. |
+| 6 | The edge sent `room_id`/`status`/float timestamps; the backend read `roomId`/`humanPresent`/Firestore Timestamps. | A normalisation layer at ingest. |
+| 7 | No `package.json`, `requirements.txt`, `firebase.json`, rules or indexes. | Added all of them. |
+| 8 | `energy_controller.py` ended in a stray markdown fence, so it was not valid Python. | Removed; the module was later deleted (#19). |
+| 9 | A Firestore transaction wrote before it read, which throws at runtime. | Reads hoisted above writes. |
+| 10 | A non-transactional `.add()` inside a transaction duplicated audit rows on retry. | Deterministic audit doc IDs. |
+| 15 | One bad frame could flag a real occupant. | The debounce from #1. |
+| 16 | `time.sleep(backoff)` inside the capture loop froze detection for up to 60s. | Retries are scheduled by wall-clock time. |
+| 17 | Payloads were silently deleted after five failed sends. | A dead-letter table. |
 
 ---
 
-## 3. Completeness estimate
+## Round 2: closing the loop
+
+After round 1 the parts worked on their own, but the chain still stopped halfway.
+
+| # | What I found | Fix |
+|---|---|---|
+| 24 | **The chain stopped halfway.** `handleOccupancy` wrote `enforcement: pending` and did nothing else. `sendLateArrivalWarning` was a callable that nothing called, so no confirmation was ever created and the reclaim job never had work. | `lib/enforcement.js` now owns the chain. `flagGhost` writes the enforcement record and the confirmation in one transaction, then sends the push from the backend. Both are keyed by booking ID, so a booking is warned at most once. The callable is gone. |
+| 14 | **Enforcement only ran when a reading arrived.** A dead camera sends nothing, and that silence is exactly what a ghost booking looks like. | `sweepActiveBookings` runs every minute and warns on vacant, stale (>3 min) or never-reported rooms. It reads one denormalised `rooms/{id}.lastReading` per room in a single `getAll`, not a query per booking. |
+| 13 | `handleOccupancy` range-filtered `startTime` and `endTime` in one query, which Firestore rejects. | Filter `startTime <= now` in Firestore and `endTime` in JavaScript. |
+| 11 | **`confirmAttendance` was unauthenticated.** The `userId` check only ran if the caller chose to send one. | It requires a Firebase ID token and the caller must own the booking. Tested with real tokens from the Auth emulator. |
+| 12 | Replay protection was only a 5-minute freshness window, so a captured "occupied" payload could be replayed inside it. | The signature is now the occupancy doc ID, so a second copy fails `create()` with 409. The edge treats 409 as delivered. |
+| 23 | There was no way to create a booking, so nothing could be demoed. | `createBooking` checks for overlaps inside a transaction. The dashboard has a booking form, and `scripts/seed.js` seeds rooms and bookings. |
+| 18, 19, 22 | **The energy figure was fiction.** The dashboard read a collection and fields the Python mock never wrote, nothing called the mock, and its maths counted occupied time as savings. | Dropped the Python mock. The reclaim job now computes `room powerKw × booking time released` and writes it to the audit log and `stats/global`, which the dashboard reads. |
+| 20 | The dashboard had placeholder config and no login, so with the rules in place it showed only permission errors. | Config comes from Hosting's `/__/firebase/init.json`. Email sign-in, `admin` and read-only `demo` roles as custom claims. |
+| 21 | The room list did a query per room inside a snapshot callback, which raced and duplicated cards. It also put `r.name` into `innerHTML`, which is an XSS hole. | One keyed card per room, updated in place with `textContent`. Room state comes from listeners on `rooms`, active bookings and enforcement, with no per-room reads. |
+| 26 | **New: every vacant reading failed its signature check.** Python serialises `0.0` as `"0.0"` and JavaScript as `"0"`. A vacant room reports exactly `0.0`, so the canonical JSON differed and the backend returned 401. I only found this by writing a cross-language test vector. | The edge normalises whole floats to ints and signs raw UTF-8. Both test suites assert the same signature. |
+| 27 | **New:** the "Reclaimed" card counted `status in ['resolved','canceled']`, but `resolved` meant a person *was* present, and the confirm path wrote `decision`, not `status`. | One status field per record (`warned → confirmed / cleared / reclaimed`) and counters maintained by the backend. |
+| 28 | **New:** the secret used deprecated `functions.config()`, and the SDKs were two majors behind. | `defineSecret('GHOST_HMAC_SECRET')` via Secret Manager. Upgraded to firebase-functions 7 (v2 API) and firebase-admin 14. |
+| 25 | No lint config, no tests, no CI, and `decision_logger.js` was imported by nothing. | ESLint flat config, 23 Node tests (most against the Firestore and Auth emulators), 7 pytest tests on the edge, and GitHub Actions running both. Every decision is now written through `decision_logger.js` and shown in the dashboard's decision log. |
+
+### What the tests cover
+
+- **Ghost path:** vacant reading → warned → window expires → booking cancelled, room freed, kWh recorded.
+- **Confirm path:** the owner confirms with a real ID token; another user gets 403; an expired window gets 410.
+- **Presence:** a person walking in after a warning clears it with no confirmation needed.
+- **Replay and forgery:** an exact replay gets 409; tampered, stale and unknown-room payloads are rejected.
+- **Device offline:** silent, never-reporting and vacant rooms are warned; an occupied room is not.
+- **Bookings:** overlap rejection and input validation.
+- **Demo controls:** staff-only, demo rooms only, short timers.
+
+---
+
+## Where it stands
 
 | Layer | State | Done |
-|-------|-------|------|
-| Edge capture | Working, hardened | 85% |
-| Edge detection | Written from scratch, needs field tuning | 70% |
-| Edge transport (HMAC, queue, retry) | Solid | 85% |
-| Backend ingest | Written from scratch | 80% |
-| Backend judging | Needs scheduled sweep + query fix | 45% |
-| Notification / confirm loop | Chain incomplete, endpoint unauthenticated | 40% |
-| Room reclaim | Now releases the room | 65% |
-| Energy control | Mock only, never invoked, math inverted | 15% |
-| Booking system | Does not exist | 0% |
-| Admin dashboard | Renders, no auth, wrong queries | 30% |
-| Tests / CI | None | 0% |
+|---|---|---|
+| Edge capture | Recovers from camera disconnects | 85% |
+| Presence detection | Works on my webcam; needs data from real rooms | 70% |
+| Edge transport | HMAC, offline queue, dead-letter, replay-safe | 90% |
+| Backend ingest | Signature, freshness, replay, unknown-room checks | 95% |
+| Judging | Event-driven plus scheduled sweep | 90% |
+| Warn / confirm | Backend-driven, token-authenticated | 80% |
+| Room reclaim | Cancels, frees, records energy | 90% |
+| Energy | Estimated from rated draw, not metered; no real switching | 60% |
+| Bookings | API, form, seed script; no calendar integration | 70% |
+| Dashboard | Auth, live state, demo panel | 85% |
+| Tests / CI | Emulator + pytest suites, Actions workflow | 85% |
 
-**Roughly 45% of a working MVP** after these fixes — up from about 25% as
-submitted, where the system could not complete a single end-to-end cycle.
+About **80% of an MVP**, up from roughly 45% after round 1 and 25% at the start.
 
----
+## Known limitations
 
-## 4. What to fix next, in order
+- **One warning per booking.** If an owner confirms and then leaves for the rest
+  of the slot, the room is not re-checked. Fix: allow a new warning once the
+  previous one is older than the grace period.
+- **Push needs a client.** The backend sends FCM to `users/{uid}.fcmToken`, but
+  nothing registers a token yet. Warnings show in the dashboard's "My bookings"
+  instead. A small PWA with a service worker would close this.
+- **One shared HMAC secret.** Every device signs with the same key, so a stolen
+  device could sign for any room. Per-device keys, bound to a room in Firestore,
+  are the fix.
+- **Energy is estimated.** The figure is rated power × time released. Measuring
+  it needs a smart plug or a BMS integration.
+- **The accuracy number is from one room.** [`BENCHMARK.md`](BENCHMARK.md) is a
+  single laptop webcam. I need a false-positive rate over a few hundred frames
+  from real classrooms before I would trust enforcement on real people.
 
-**Week 1 — make one full cycle work**
-1. Add a scheduled `sweepActiveBookings` function that runs every minute and
-   checks *all* active bookings for missing/stale occupancy. This replaces
-   event-driven enforcement and fixes defect #14 — the current design cannot
-   detect the silence that ghost bookings actually produce.
-2. Split the two-range-field query (#13): filter on `startTime <= now` in
-   Firestore, then filter `endTime >= now` in memory.
-3. Wire the chain: `handleOccupancy` writes enforcement → calls
-   `sendLateArrivalWarning` → creates confirmation → scheduled cancel picks it up.
-4. Require a Firebase ID token on `confirmAttendance` (#11) and verify the
-   caller owns the booking.
+## Open questions beyond the code
 
-**Week 2 — make it demonstrable**
-5. Minimal booking API + a booking page. Without this there is nothing to demo.
-6. Fix the energy metric collection/field names and the inverted arithmetic.
-7. Add Firebase Auth to the dashboard and fix the N+1 render race.
-8. Seed script that populates rooms and bookings for a live demo.
+**Why a camera at all?** A mmWave presence sensor costs about $10 and needs no
+model and no privacy conversation. My answers: it can reuse cameras that are
+already installed, it needs no new wiring, and it can extend to headcount. I
+still need to test those answers with someone who runs a campus.
 
-**Week 3 — make it credible**
-9. Emulator-based integration tests: ghost path, confirm path, replay attack,
-   device-offline path.
-10. GitHub Actions CI running lint + tests.
-11. Record accuracy numbers: false-positive rate over a few hundred real frames.
-    A single measured number here is worth more than any amount of README prose.
+**Calendars.** No one manages rooms in a bare Firestore collection. Google
+Calendar and Outlook integration matters more for adoption than any defect
+above.
 
----
+**Cost per room.** A Pi 4, camera, enclosure and PoE come to about ₹6,000–8,000.
+At 4.3 kW × 3 h/day × ₹8/kWh that pays back in a few months. That calculation
+should be front and centre, with real tariffs.
 
-## 5. Market gaps — the honest part
-
-Engineering aside, these determine whether this is a product:
-
-**The competitive threat is a $10 sensor.** A mmWave presence sensor detects
-occupancy without a camera, without a Raspberry Pi, without an ML model, and
-without a privacy conversation. Before building further, answer: *why a camera?*
-There are good answers — headcount vs. binary presence, no new wiring, using
-cameras already installed — but they must be stated and defended.
-
-**Nobody manages rooms in a bare Firestore collection.** Real customers run
-Google Calendar, Outlook, Robin, or an ERP like Blackbaud/Ellucian. Without a
-calendar integration this can never be adopted, only demoed. This is a bigger
-gap than any code defect listed above.
-
-**Cost per room is unstated.** Pi 4 + camera + enclosure + PoE ≈ ₹6,000–8,000
-per room. At 4.3 kW × 3 hours saved/day × ₹8/kWh, payback is a few months —
-that arithmetic is your entire sales pitch and it is currently absent.
-
-**Compliance is not optional in India.** Cameras in classrooms fall under the
-DPDP Act 2023. You need signage, a stated retention policy (yours is "zero",
-which is excellent), and a documented DPIA. Your metadata-only architecture is
-a genuine legal advantage — but only if you write it down.
-
-**Missing entirely:** multi-tenancy, roles, onboarding, pricing, hardware BOM,
-and any measured accuracy figure.
-
----
-
-## 6. How to present this on GitHub
-
-Do not oversell. A README claiming a finished product invites a reviewer to
-find defect #1 in ninety seconds; a README that says *"presence detection with
-temporal debounce; scheduled enforcement sweep in progress"* reads as an
-engineer who knows the state of their own system. The second is far more
-impressive to anyone technical.
-
-Lead with the architecture diagram and the privacy design. Keep a visible
-"Current status" table with honest percentages. Ship the audit as a document —
-finding twenty-five defects in your own code and fixing seventeen of them is a
-stronger portfolio signal than the feature list ever was.
+**Compliance.** Cameras in Indian classrooms fall under the DPDP Act 2023. I
+need signage, a written retention policy (zero retention is a real advantage
+here), and a DPIA before any live pilot.

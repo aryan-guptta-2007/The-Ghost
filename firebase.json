@@ -2,7 +2,7 @@
   "functions": {
     "source": "functions",
     "runtime": "nodejs22",
-    "ignore": ["node_modules", ".git", "*.log"]
+    "ignore": ["node_modules", ".git", "*.log", "test", "scripts", ".secret.local"]
   },
   "firestore": {
     "rules": "firestore.rules",
@@ -11,13 +11,19 @@
   "hosting": {
     "public": "dashboard",
     "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
-    "rewrites": [{ "source": "/api/confirm", "function": "confirmAttendance" }]
+    "rewrites": [
+      { "source": "/api/confirm", "function": { "functionId": "confirmAttendance" } },
+      { "source": "/api/bookings", "function": { "functionId": "createBooking" } },
+      { "source": "/api/demo", "function": { "functionId": "demoAction" } },
+      { "source": "/api/tick", "function": { "functionId": "schedulerTick" } }
+    ]
   },
   "emulators": {
+    "auth": { "port": 9099 },
     "functions": { "port": 5001 },
     "firestore": { "port": 8080 },
     "hosting": { "port": 5000 },
-    "pubsub": { "port": 8085 },
-    "ui": { "enabled": true }
+    "ui": { "enabled": true },
+    "singleProjectMode": true
   }
 }

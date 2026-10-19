@@ -2,12 +2,17 @@ rules_version = '2';
 
 // Ghost Resource Buster — Firestore security rules
 //
-// WHY THIS FILE MATTERS:
-// decision_logger.js states "security rules enforce no deletes/updates",
-// but no rules file existed. Without it a Firebase project runs in either
-// test mode (world-readable AND world-writable) or locked mode (nothing
-// works). Either way the audit trail was unenforceable and the admin
-// dashboard exposed every enforcement record to the public internet.
+// Clients read. Apart from two narrow self-service writes (cancelling your
+// own booking, registering your own FCM token), every write goes through a
+// Cloud Function using the Admin SDK, which bypasses these rules: readings
+// are HMAC-verified, bookings are overlap-checked, confirmations are tied
+// to an ID token.
+//
+// Roles are custom claims, set with functions/scripts/set-role.js:
+//   admin  full read access
+//   demo   same read access, for the public demo login. It has no extra
+//          write power; the demo panel calls demoAction, which only touches
+//          rooms flagged demo: true.
 
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -16,77 +21,77 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function isAdmin() {
-      // Set with: admin.auth().setCustomUserClaims(uid, { admin: true })
-      return isSignedIn() && request.auth.token.admin == true;
+    function isStaff() {
+      return isSignedIn()
+        && (request.auth.token.admin == true || request.auth.token.demo == true);
+    }
+
+    function isOwner(data) {
+      return isSignedIn() && data.userId == request.auth.uid;
     }
 
     // ---- Rooms -------------------------------------------------------
-    // Anyone signed in can see room status; only admins edit rooms.
-    // Cloud Functions bypass these rules via the Admin SDK.
+    // Anyone signed in can see rooms and their live reading.
     match /rooms/{roomId} {
       allow read:  if isSignedIn();
-      allow write: if isAdmin();
+      allow write: if false;
     }
 
     // ---- Bookings ----------------------------------------------------
-    // Users read and create their own; only admins see everything.
+    // Created only through the createBooking function (overlap check).
+    // An owner may cancel their own booking and change nothing else.
     match /bookings/{bookingId} {
-      allow read: if isAdmin()
-                  || (isSignedIn() && resource.data.userId == request.auth.uid);
-      allow create: if isSignedIn()
-                    && request.resource.data.userId == request.auth.uid
-                    && request.resource.data.status == 'scheduled';
-      // Users may only cancel their own booking, nothing else.
-      allow update: if isSignedIn()
-                    && resource.data.userId == request.auth.uid
-                    && request.resource.data.status == 'canceled';
+      allow read:   if isStaff() || isOwner(resource.data);
+      allow create: if false;
+      allow update: if isOwner(resource.data)
+                    && request.resource.data.status == 'canceled'
+                    && request.resource.data.diff(resource.data)
+                         .affectedKeys().hasOnly(['status']);
       allow delete: if false;
     }
 
     // ---- Occupancy ---------------------------------------------------
-    // Written ONLY by receiveOccupancy via the Admin SDK after HMAC
-    // verification. No client may write here — otherwise anyone could
-    // forge "room is empty" and cancel someone else's booking.
+    // Written only by receiveOccupancy after HMAC verification. A client
+    // write here could forge "room is empty" and cancel someone's booking.
     match /occupancy/{occId} {
-      allow read:  if isAdmin();
+      allow read:  if isStaff();
       allow write: if false;
     }
 
-    // ---- Enforcement decisions --------------------------------------
-    match /enforcement/{enfId} {
-      allow read:  if isAdmin();
+    // ---- Enforcement and confirmations -------------------------------
+    match /enforcement/{bookingId} {
+      allow read:  if isStaff();
       allow write: if false;
     }
 
-    // ---- Confirmations ----------------------------------------------
-    // The owning user may read theirs; status changes go through the
-    // confirmAttendance function, never direct client writes.
-    match /confirmations/{confId} {
-      allow read: if isAdmin()
-                  || (isSignedIn() && resource.data.userId == request.auth.uid);
+    // The owner reads their own warning; answering it goes through
+    // confirmAttendance, which checks their ID token.
+    match /confirmations/{bookingId} {
+      allow read:  if isStaff() || isOwner(resource.data);
+      allow write: if false;
+    }
+
+    // ---- Dashboard counters ------------------------------------------
+    match /stats/{statId} {
+      allow read:  if isStaff();
       allow write: if false;
     }
 
     // ---- Append-only audit trail ------------------------------------
-    // Immutability is the whole point: no updates, no deletes, ever.
+    // No updates, no deletes, for anyone. Only the Admin SDK writes.
     match /audit_logs/{logId} {
-      allow read:   if isAdmin();
-      allow create: if false;  // Admin SDK only
-      allow update: if false;
-      allow delete: if false;
+      allow read:  if isStaff();
+      allow write: if false;
     }
 
     match /decision_logs/{logId} {
-      allow read:   if isAdmin();
-      allow create: if false;  // Admin SDK only
-      allow update: if false;
-      allow delete: if false;
+      allow read:  if isStaff();
+      allow write: if false;
     }
 
     // ---- Users -------------------------------------------------------
     match /users/{userId} {
-      allow read: if isAdmin() || (isSignedIn() && request.auth.uid == userId);
+      allow read: if isStaff() || (isSignedIn() && request.auth.uid == userId);
       // A user may register their own FCM token but nothing else.
       allow update: if isSignedIn()
                     && request.auth.uid == userId
