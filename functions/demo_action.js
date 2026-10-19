@@ -11,9 +11,10 @@
   Injected readings go through the same writeReading path as the edge
   device, so they trigger handleOccupancy exactly like real ones.
 
-  schedulerTick (HTTP POST /api/tick): runs the sweep and reclaim jobs once.
-  The emulator does not fire scheduled functions, so the dashboard and the
-  simulator call this instead. It refuses to run outside the emulator.
+  schedulerTick (HTTP POST, Functions emulator URL only): runs the sweep and
+  reclaim jobs once. The emulator does not fire scheduled functions, so the
+  dashboard and the simulator call this instead. index.js exports it only
+  inside the emulator, and it refuses to run outside the emulator.
 */
 
 const { onRequest } = require('firebase-functions/v2/https');
