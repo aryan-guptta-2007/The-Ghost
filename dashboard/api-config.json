@@ -1,4 +1,4 @@
 {
-  "apiBase": "",
+  "apiBase": "https://the-ghost-backend.vercel.app/api",
   "staleSeconds": 720
 }
