@@ -1,97 +1,48 @@
-// functions/index.js (updated handleOccupancy)
+// functions/handle_occupancy.js
 /*
-  Firebase Cloud Function: Occupancy Enforcement
-  -------------------------------------------------
-  Updated to:
-  • Prevent duplicate enforcement actions (idempotent writes).
-  • Gracefully handle delayed or missing occupancy updates.
+  handleOccupancy (Firestore trigger on occupancy/{occId}): the fast path.
+  Reacts to a reading the moment it lands.
+
+    vacant   + booking past its grace period -> flagGhost (warn the owner)
+    occupied + an open warning               -> clearByPresence
+
+  Silence (dead camera, unplugged device) produces no reading, so this
+  trigger can never see it. sweepActiveBookings covers that case.
 */
 
-const functions = require('firebase-functions');
-const { admin, db } = require('./lib/firebase');
+const { onDocumentCreated } = require('firebase-functions/v2/firestore');
+const { Timestamp } = require('./lib/firebase');
+const {
+  findActiveBooking,
+  graceElapsed,
+  flagGhost,
+  clearByPresence,
+} = require('./lib/enforcement');
 
-/**
- * Helper: create a unique enforcement key for a booking.
- * Using roomId + bookingId + detection window start ensures idempotency.
- */
-function enforcementDocId(roomId, bookingId, detectionTs) {
-  // Simple deterministic ID – can be any hash; using base64 of concatenated string.
-  const raw = `${roomId}_${bookingId}_${detectionTs.seconds}`;
-  return Buffer.from(raw).toString('base64');
+/** Returns what happened, for logs and tests. */
+async function evaluateReading(occ, now = Timestamp.now()) {
+  const { roomId, humanPresent } = occ;
+  if (!roomId) return 'invalid';
+
+  const bookingDoc = await findActiveBooking(roomId, now);
+  if (!bookingDoc) return 'no_booking';
+
+  // The edge device already debounces 7 of 10 frames, so its verdict is
+  // used as-is. Confidence is informational.
+  if (humanPresent) {
+    return (await clearByPresence(bookingDoc.id, now)) ? 'cleared' : 'present';
+  }
+  if (!graceElapsed(bookingDoc.data(), now)) return 'in_grace';
+
+  const created = await flagGhost(bookingDoc, 'Room reads vacant after grace period', 'occupancy_trigger', now);
+  return created ? 'warned' : 'already_warned';
 }
 
-exports.handleOccupancy = functions.firestore
-  .document('occupancy/{occId}')
-  .onCreate(async (snap, context) => {
-    const occ = snap.data();
-    const { roomId, timestamp, humanPresent, confidence } = occ;
+const handleOccupancy = onDocumentCreated('occupancy/{occId}', async (event) => {
+  const occ = event.data && event.data.data();
+  if (!occ) return;
+  const outcome = await evaluateReading(occ);
+  console.log(`handleOccupancy ${event.params.occId} room=${occ.roomId}: ${outcome}`);
+});
 
-    if (!roomId || !timestamp) {
-      console.warn('Occupancy document missing required fields');
-      return null;
-    }
-
-    const now = admin.firestore.Timestamp.now();
-    const bookingsRef = db.collection('bookings');
-    const activeBookingSnap = await bookingsRef
-      .where('roomId', '==', roomId)
-      .where('status', 'in', ['scheduled', 'active'])
-      .where('startTime', '<=', now)
-      .where('endTime', '>=', now)
-      .limit(1)
-      .get();
-
-    if (activeBookingSnap.empty) {
-      // No active booking – could be free use or missing booking.
-      // Optional: log a "ghost occupancy without booking" event for audit.
-      console.log(`No active booking for room ${roomId} at ${timestamp.toDate()}`);
-      return null;
-    }
-
-    const bookingDoc = activeBookingSnap.docs[0];
-    const bookingId = bookingDoc.id;
-    const bookingStart = bookingDoc.get('startTime');
-
-    // Compute elapsed time since booking start.
-    const elapsedSec = now.seconds - bookingStart.seconds;
-    const GRACE_SECONDS = 10 * 60; // 10 minutes
-
-    // Only evaluate after the grace period.
-    if (elapsedSec < GRACE_SECONDS) {
-      console.log(`Grace period not elapsed for booking ${bookingId} (elapsed ${elapsedSec}s)`);
-      return null;
-    }
-
-    // Determine if the room appears empty.
-    const isEmpty = !humanPresent || confidence < 0.5;
-    const decision = isEmpty ? 'abusive' : 'ok';
-    const reason = isEmpty
-      ? `No human detected 10 min after booking start (elapsed ${elapsedSec}s)`
-      : 'Human presence confirmed';
-
-    // Idempotent enforcement: generate a deterministic doc ID.
-    const enfId = enforcementDocId(roomId, bookingId, timestamp);
-    const enforcementRef = db.collection('enforcement').doc(enfId);
-
-    // Use a transaction to ensure we don't duplicate.
-    await db.runTransaction(async (tx) => {
-      const existing = await tx.get(enforcementRef);
-      if (existing.exists) {
-        // Already processed – skip duplicate.
-        console.log(`Enforcement already exists for ${enfId}`);
-        return;
-      }
-      const enforcementDoc = {
-        roomId,
-        bookingId,
-        decision,
-        reason,
-        timestamp: now,
-        status: decision === 'abusive' ? 'pending' : 'resolved',
-      };
-      tx.set(enforcementRef, enforcementDoc);
-    });
-
-    console.log(`Enforcement ${decision} recorded for booking ${bookingId}`);
-    return null;
-  });
+module.exports = { handleOccupancy, evaluateReading };

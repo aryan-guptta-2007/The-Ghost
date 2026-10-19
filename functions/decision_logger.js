@@ -1,28 +1,27 @@
 // functions/decision_logger.js
 // Helper to write immutable decision logs to Firestore collection "decision_logs".
-// All fields are non‑PII. The collection is append‑only; security rules enforce no deletes/updates.
+// All fields are non-PII. The collection is append-only; firestore.rules deny
+// client writes, updates and deletes.
 
-const { admin, db } = require('./lib/firebase');
+const { db, FieldValue } = require('./lib/firebase');
 
 /**
  * Log a decision made by any agent.
- * @param {string} agentName - e.g. 'VisionAgent', 'JudgeAgent', 'EnforcerAgent'
- * @param {string} decision - textual description of the action taken
+ * @param {string} agentName - e.g. 'JudgeAgent', 'EnforcerAgent', 'ReclaimAgent'
+ * @param {string} decision - short action name, e.g. 'warned', 'reclaimed'
  * @param {string} reason   - why the decision was made (e.g., rule, confidence)
  * @param {string} roomId   - affected room identifier
  * @param {string|null} bookingId - optional booking identifier
  */
 async function logDecision(agentName, decision, reason, roomId, bookingId = null) {
-    const doc = {
-        agent_name: agentName,
-        decision: decision,
-        reason: reason,
-        room_id: roomId,
-        booking_id: bookingId,
-        timestamp: admin.firestore.FieldValue.serverTimestamp(),
-    };
-    // Use auto‑generated ID; security rules will prevent updates/deletes.
-    await db.collection('decision_logs').add(doc);
+  await db.collection('decision_logs').add({
+    agent_name: agentName,
+    decision,
+    reason,
+    room_id: roomId || null,
+    booking_id: bookingId,
+    timestamp: FieldValue.serverTimestamp(),
+  });
 }
 
 module.exports = { logDecision };

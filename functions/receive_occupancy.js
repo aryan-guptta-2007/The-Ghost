@@ -1,133 +1,105 @@
 // functions/receive_occupancy.js
 /*
-  Firebase Cloud Function: receiveOccupancy  (HTTP POST)
-  ------------------------------------------------------
-  This is the endpoint edge_ai/metadata_sender.py posts to. It was
-  referenced by the edge device but never implemented — this closes the
-  edge -> backend gap.
+  receiveOccupancy (HTTP POST): the endpoint edge_ai/metadata_sender.py and
+  scripts/simulate.js post to.
 
-  Responsibilities:
-    1. Verify the HMAC-SHA256 signature using the shared secret.
-    2. Reject replayed / stale payloads (timestamp freshness window).
-    3. Normalise the edge device's snake_case schema into the camelCase
-       schema that handleOccupancy expects.
-    4. Write one document into `occupancy/`, which triggers handleOccupancy.
-
-  SCHEMA TRANSLATION (this mismatch was a silent breakage):
-      edge sends   -> { room_id, status: "occupied"|"vacant", confidence, timestamp }
-      backend uses -> { roomId,  humanPresent: bool,          confidence, timestamp }
-
-  SECRET:
-      firebase functions:config:set ghost.hmac_secret="<same value as GHOST_HMAC_SECRET>"
+    1. Verify the HMAC-SHA256 signature with the shared secret.
+    2. Reject stale payloads (5-minute freshness window) and exact replays
+       (the signature is used as the occupancy doc ID, so a second copy of
+       the same payload fails create()).
+    3. Normalise the edge schema into the backend schema:
+         edge    { room_id, status: "occupied"|"vacant", confidence, timestamp }
+         backend { roomId,  humanPresent: bool,          confidence, timestamp }
+    4. Write occupancy/{signature} (triggers handleOccupancy) and update
+       rooms/{roomId}.lastReading, which the sweep and dashboard read.
 */
 
-const functions = require('firebase-functions');
-const crypto = require('crypto');
-const { admin, db } = require('./lib/firebase');
+const { onRequest } = require('firebase-functions/v2/https');
+const { db, Timestamp } = require('./lib/firebase');
+const { HttpError } = require('./lib/auth');
+const { verifySignature } = require('./lib/hmac');
+const { HMAC_SECRET, MAX_CLOCK_SKEW_SECONDS } = require('./lib/config');
 
-// Payloads older than this are rejected as possible replays.
-const MAX_CLOCK_SKEW_SECONDS = 300; // 5 minutes
+const ALREADY_EXISTS = 6; // gRPC status code
 
-function getSecret() {
-  const secret =
-    process.env.GHOST_HMAC_SECRET ||
-    (functions.config().ghost && functions.config().ghost.hmac_secret);
-  if (!secret) {
-    throw new Error('HMAC secret not configured (ghost.hmac_secret)');
-  }
-  return secret;
-}
-
-/**
- * Recreate the canonical JSON the device signed: sorted keys, no whitespace,
- * signature field excluded. Must byte-for-byte match _canonical_json() in
- * edge_ai/metadata_sender.py.
- */
-function canonicalJson(payload) {
-  const { signature, ...rest } = payload;
-  const sorted = {};
-  Object.keys(rest)
-    .sort()
-    .forEach((k) => {
-      sorted[k] = rest[k];
-    });
-  return JSON.stringify(sorted);
-}
-
-function verifySignature(payload) {
-  const expected = crypto
-    .createHmac('sha256', getSecret())
-    .update(canonicalJson(payload), 'utf8')
-    .digest('hex');
-
-  const provided = String(payload.signature || '');
-  // Constant-time compare; lengths must match or timingSafeEqual throws.
-  if (provided.length !== expected.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
-}
-
-/**
- * Accept either an ISO-8601 string or a UNIX float (the device currently
- * sends a float even though its docstring promises ISO — accept both).
- */
+/** ISO-8601 string, or UNIX seconds from older edge builds. */
 function parseTimestamp(raw) {
   if (typeof raw === 'number') return new Date(raw * 1000);
   const d = new Date(raw);
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-exports.receiveOccupancy = functions.https.onRequest(async (req, res) => {
-  if (req.method !== 'POST') {
-    return res.status(405).send({ error: 'Method Not Allowed' });
-  }
+/**
+ * Persist one reading. Also used by demoAction, which is authenticated by
+ * Firebase Auth instead of HMAC.
+ */
+async function writeReading({ roomId, humanPresent, confidence, timestamp, source, docId }) {
+  const roomRef = db.collection('rooms').doc(roomId);
+  const occRef = docId ? db.collection('occupancy').doc(docId) : db.collection('occupancy').doc();
+  const ts = Timestamp.fromDate(timestamp);
+  const reading = { humanPresent, confidence, timestamp: ts, source };
 
-  const payload = req.body || {};
-  const { room_id: roomId, status, confidence, timestamp } = payload;
-
-  if (!roomId || !status || timestamp === undefined) {
-    return res
-      .status(400)
-      .send({ error: 'Missing room_id, status or timestamp' });
-  }
-
-  // 1. Authenticate the device.
-  let signatureOk = false;
   try {
-    signatureOk = verifySignature(payload);
+    await db.runTransaction(async (tx) => {
+      const room = await tx.get(roomRef);
+      if (!room.exists) throw new HttpError(404, `Unknown room ${roomId}`);
+      tx.create(occRef, { roomId, ...reading, receivedAt: Timestamp.now() });
+      // Out-of-order delivery (the edge queue retries) must not overwrite
+      // a newer reading.
+      const last = room.get('lastReading');
+      if (!last || last.timestamp.toMillis() <= ts.toMillis()) {
+        tx.update(roomRef, { lastReading: reading });
+      }
+    });
   } catch (err) {
-    console.error('Signature verification error:', err.message);
-    return res.status(500).send({ error: 'Server misconfigured' });
+    if (err.code === ALREADY_EXISTS) throw new HttpError(409, 'Duplicate payload');
+    throw err;
   }
-  if (!signatureOk) {
+}
+
+/** Validates and stores a signed payload. Returns { status, body }. */
+async function ingestReading(payload, secret, nowMs = Date.now()) {
+  const { room_id: roomId, status, confidence, timestamp } = payload || {};
+
+  if (!roomId || !['occupied', 'vacant'].includes(status) || timestamp === undefined) {
+    return { status: 400, body: { error: 'Missing or invalid room_id, status or timestamp' } };
+  }
+  if (!verifySignature(payload, secret)) {
     console.warn(`Rejected unsigned/forged payload for room ${roomId}`);
-    return res.status(401).send({ error: 'Invalid signature' });
+    return { status: 401, body: { error: 'Invalid signature' } };
   }
 
-  // 2. Reject stale payloads (replay protection).
   const ts = parseTimestamp(timestamp);
-  if (!ts) {
-    return res.status(400).send({ error: 'Unparseable timestamp' });
-  }
-  const skewSeconds = Math.abs((Date.now() - ts.getTime()) / 1000);
+  if (!ts) return { status: 400, body: { error: 'Unparseable timestamp' } };
+  const skewSeconds = Math.abs(nowMs - ts.getTime()) / 1000;
   if (skewSeconds > MAX_CLOCK_SKEW_SECONDS) {
     console.warn(`Stale payload for ${roomId}, skew ${skewSeconds}s`);
-    return res.status(400).send({ error: 'Timestamp outside accepted window' });
+    return { status: 400, body: { error: 'Timestamp outside accepted window' } };
   }
 
-  // 3. Normalise into the internal schema and persist.
   try {
-    await db.collection('occupancy').add({
+    await writeReading({
       roomId,
       humanPresent: status === 'occupied',
       confidence: typeof confidence === 'number' ? confidence : 0,
-      timestamp: admin.firestore.Timestamp.fromDate(ts),
-      receivedAt: admin.firestore.Timestamp.now(),
+      timestamp: ts,
       source: 'edge_device',
+      docId: payload.signature,
     });
   } catch (err) {
+    if (err instanceof HttpError) return { status: err.status, body: { error: err.message } };
     console.error('Failed to write occupancy doc:', err);
-    return res.status(500).send({ error: 'Internal server error' });
+    return { status: 500, body: { error: 'Internal server error' } };
   }
+  return { status: 200, body: { success: true, roomId } };
+}
 
-  return res.status(200).send({ success: true, roomId });
+const receiveOccupancy = onRequest({ secrets: [HMAC_SECRET] }, async (req, res) => {
+  if (req.method !== 'POST') {
+    return res.status(405).send({ error: 'Method Not Allowed' });
+  }
+  const { status, body } = await ingestReading(req.body, HMAC_SECRET.value());
+  return res.status(status).send(body);
 });
+
+module.exports = { receiveOccupancy, ingestReading, writeReading };

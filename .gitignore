@@ -5,11 +5,10 @@
 serviceAccountKey.json
 *-firebase-adminsdk-*.json
 functions/.runtimeconfig.json
+functions/.secret.local
 
 # Runtime artifacts
 edge_ai/pending_payloads.db
-energy/energy_log.jsonl
-*.jsonl
 
 # Node
 node_modules/
@@ -28,5 +27,5 @@ venv/
 .vscode/
 .idea/
 
-firestore-debug.log
-pubsub-debug.log
+*-debug.log
+.pytest_cache/
