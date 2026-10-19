@@ -9,6 +9,12 @@ const { usingEmulator } = require('./firebase');
 
 const LOCAL_ORIGINS = ['http://127.0.0.1:5000', 'http://localhost:5000'];
 
+// One line per cold start, so Vercel's logs show what actually ran: the Node
+// version (must match engines.node) and the region (vercel.json: bom1).
+if (process.env.VERCEL) {
+  console.log(`[runtime] node ${process.version} region ${process.env.VERCEL_REGION || 'unknown'}`);
+}
+
 /**
  * Browser origins allowed to call the API: the Firebase Hosting site, set
  * in ALLOWED_ORIGINS as a comma-separated list. Edge devices and cron jobs
