@@ -43,9 +43,9 @@ async function addBooking({ roomId, userId = 'owner', startedMinAgo = 11, length
   return ref.get();
 }
 
-function signedPayload(roomId, status, { confidence = status === 'occupied' ? 0.78 : 0, at = new Date() } = {}) {
+function signedPayload(roomId, status, { confidence = status === 'occupied' ? 0.78 : 0, at = new Date(), key = SECRET } = {}) {
   const payload = { room_id: roomId, status, confidence, timestamp: at.toISOString() };
-  return { ...payload, signature: sign(payload, SECRET) };
+  return { ...payload, signature: sign(payload, key) };
 }
 
 /** Creates a user in the Auth emulator and returns a real ID token for it. */

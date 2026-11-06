@@ -29,11 +29,22 @@ function sign(payload, secret) {
 }
 
 function verifySignature(payload, secret) {
-  const expected = sign(payload, secret);
-  const provided = String(payload.signature || '');
-  // Constant-time compare; lengths must match or timingSafeEqual throws.
+  const expected = Buffer.from(sign(payload, secret));
+  const provided = Buffer.from(String(payload.signature || ''));
+  // Constant-time compare. timingSafeEqual throws unless the byte lengths
+  // match, and a non-ASCII signature has more bytes than characters.
   if (provided.length !== expected.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
+  return crypto.timingSafeEqual(provided, expected);
 }
 
-module.exports = { canonicalJson, sign, verifySignature };
+/**
+ * The signing key for one room's device, derived from the master secret. A
+ * device holds only this, so a stolen device can sign for its own room and
+ * no other. Deriving it means no key storage and no extra Firestore read.
+ * Hand one out with `npm run device-key -- <roomId>`.
+ */
+function deviceKey(masterSecret, roomId) {
+  return crypto.createHmac('sha256', masterSecret).update(`device:${roomId}`, 'utf8').digest('hex');
+}
+
+module.exports = { canonicalJson, sign, verifySignature, deviceKey };

@@ -1,4 +1,5 @@
 {
   "apiBase": "https://the-ghost-backend.vercel.app/api",
-  "staleSeconds": 720
+  "staleSeconds": 720,
+  "vapidKey": ""
 }

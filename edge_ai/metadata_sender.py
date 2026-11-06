@@ -1,7 +1,9 @@
 # edge_ai/metadata_sender.py
 """Utility to send occupancy metadata to the backend with HMAC authentication.
 
-The edge device holds a secret key (environment variable GHOST_HMAC_SECRET).
+The edge device holds a signing key (environment variable GHOST_HMAC_SECRET).
+Give each device its own room's key from `npm run device-key -- <roomId>`, so
+a stolen device can only sign for its own room.
 Each payload includes:
   - room_id
   - status ("occupied" / "vacant")
@@ -19,11 +21,12 @@ import hashlib
 
 import requests
 
-# Backend endpoint: the deployed /api/occupancy URL on Vercel.
-BACKEND_URL = os.getenv(
-    "GHOST_BACKEND_URL",
-    "https://<your-app>.vercel.app/api/occupancy",
-)
+# Backend endpoint: the deployed /api/occupancy URL on Vercel. Required; the
+# orchestrator refuses to start without it.
+BACKEND_URL = os.getenv("GHOST_BACKEND_URL", "")
+
+# Worth another try even though they are 4xx: the server may well recover.
+RETRYABLE_4XX = (408, 429)
 
 
 def _secret() -> bytes:
@@ -73,6 +76,7 @@ def build_payload(room_id: str, status: str, confidence: float, timestamp: str, 
 def send_room_metadata(room_id: str, status: str, confidence: float, timestamp: str) -> dict:
     """POST the metadata to the backend with a signature.
     Returns a dict with ``success`` and either ``response`` or ``error``.
+    ``permanent`` is set on a rejection that no retry can fix.
     """
     payload = build_payload(room_id, status, confidence, timestamp)
     try:
@@ -87,6 +91,12 @@ def send_room_metadata(room_id: str, status: str, confidence: float, timestamp: 
         # has been superseded), so there is nothing left to deliver.
         if resp.status_code == 409:
             return {"success": True, "response": {"duplicate": True}}
+        if 400 <= resp.status_code < 500 and resp.status_code not in RETRYABLE_4XX:
+            return {
+                "success": False,
+                "permanent": True,
+                "error": f"HTTP {resp.status_code}: {resp.text[:200]}",
+            }
         resp.raise_for_status()
         return {"success": True, "response": resp.json()}
     except Exception as exc:

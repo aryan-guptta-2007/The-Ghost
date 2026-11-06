@@ -7,11 +7,11 @@ are booked but empty, gives the owner a chance to say "I'm here", and otherwise
 releases the room and records the energy saved. No image or video ever leaves
 the room.
 
-> **Status: working MVP (~80%).** The full detect → warn → confirm/reclaim loop
+> **Status: working MVP (~90%).** The full detect → warn → confirm/reclaim loop
 > runs end to end, covered by emulator tests and CI, and production runs on
 > free tiers (Firebase Spark + Vercel Hobby, no credit card). Open items are
-> calendar integration, a push-notification client and per-device keys. See
-> [`docs/AUDIT.md`](docs/AUDIT.md) for the engineering log.
+> calendar integration, metered energy, and an accuracy benchmark from real
+> classrooms. See [`docs/AUDIT.md`](docs/AUDIT.md) for the engineering log.
 
 ---
 
@@ -39,8 +39,9 @@ correctly signed sensor payloads:
 Open **http://127.0.0.1:5000** and click **Use the demo account**. On any room,
 **Book now** → **Empty** shows the warning arrive, with a countdown, in both the
 room card and your own "My bookings" banner. Click **I'm here** to keep the room,
-or wait 60 seconds and watch it get reclaimed. Every decision appears in the
-decision log as it happens.
+or wait 60 seconds and watch it get reclaimed. If you confirm and the room stays
+empty, you are warned again once the 30-second grace period has passed. Every
+decision appears in the decision log as it happens.
 
 Demo bookings use a 30-second grace period and a 60-second confirmation window,
 and the demo treats a sensor as silent after 3 minutes. Production uses 10
@@ -126,13 +127,18 @@ the last 10 frames to agree before flipping state, and it starts in the
 **Signed transport with replay protection.** HMAC-SHA256 over canonical JSON,
 constant-time comparison, a 5-minute freshness window, and a rule that each
 reading must be newer than the room's last one. An exact replay or a stale
-out-of-order delivery gets 409, and no per-reading document is needed. The
-Python signer and the JavaScript verifier share a test vector, which is how I
-found that Python's `0.0` and JavaScript's `0` broke every vacant reading.
+out-of-order delivery gets 409, and no per-reading document is needed. Each
+device signs with a key derived from the master secret and its room ID, so a
+stolen device can only speak for its own room, and verifying that costs no
+extra read. The Python signer and the JavaScript verifier share a test vector,
+which is how I found that Python's `0.0` and JavaScript's `0` broke every
+vacant reading.
 
 **Idempotent enforcement.** Enforcement and confirmation docs are keyed by
 booking ID and created in one transaction, so any number of readings, sweeps
-or retries warn a booking at most once.
+or retries produce one warning. An answered warning is not the end of it: if
+the room still reads empty a full grace period later, the owner is warned
+again, so nobody can confirm once and walk away with the slot.
 
 **Least-privilege clients.** `firestore.rules` lets clients read. Every write
 that matters goes through the API: readings are HMAC-verified, bookings are
@@ -146,15 +152,15 @@ overlap-checked, confirmations need the owner's ID token. `audit_logs` and
 | Component | State | |
 |-----------|-------|--|
 | Edge capture | Auto-recovers from camera disconnect | 85% |
-| Presence detection | MediaPipe + HOG fallback, debounced | 70% |
-| Signed transport | HMAC, offline queue, dead-letter, replay-safe | 90% |
+| Presence detection | MediaPipe + HOG fallback, debounced, no verdict before evidence | 75% |
+| Signed transport | HMAC, per-room keys, queue that outlasts an outage, dead-letter | 95% |
 | Backend ingest | Signature, freshness, replay, unknown-room checks | 95% |
-| Enforcement | Judged on arrival + cron sweep, idempotent | 90% |
-| Warn / confirm loop | Backend-driven, ID-token authenticated | 80% |
+| Enforcement | Judged on arrival + cron sweep, idempotent, re-checks after an answer | 95% |
+| Warn / confirm loop | Backend-driven, ID-token authenticated, web push once configured | 90% |
 | Room reclaim + energy | Cancels, frees room, records kWh released | 90% |
-| Booking API | Overlap-checked API, booking form, seed script | 70% |
-| Dashboard | Login, roles, live state, demo panel | 85% |
-| Tests / CI | 39 Node tests (emulator + unit + runtime), 7 edge tests, GitHub Actions | 85% |
+| Booking API | Overlap-checked API, booking form, room and seed scripts | 75% |
+| Dashboard | Login, password reset, roles, live state, demo panel, installable | 90% |
+| Tests / CI | 63 Node tests (emulator + rules + unit + runtime), 37 edge tests, GitHub Actions | 90% |
 
 What's left, and why, is in [`docs/AUDIT.md`](docs/AUDIT.md#known-limitations).
 
@@ -202,7 +208,7 @@ GitHub. Steps marked 🔑 need you to sign in; nothing here asks for a card.
    | Name | Value |
    |---|---|
    | `FIREBASE_SERVICE_ACCOUNT` | the entire contents of the key JSON |
-   | `GHOST_HMAC_SECRET` | `openssl rand -hex 32` (edge devices use the same value) |
+   | `GHOST_HMAC_SECRET` | `openssl rand -hex 32` (the master secret; each device gets a key derived from it, see [Edge device](#edge-device)) |
    | `CRON_SECRET` | `openssl rand -hex 32` (a different value) |
    | `ALLOWED_ORIGINS` | `https://<project-id>.web.app,https://<project-id>.firebaseapp.com` |
 
@@ -250,8 +256,37 @@ DEMO_PASSWORD=<pick one> node scripts/seed.js --project <id>
 To put a **Use the demo account** button on the live dashboard, add
 `dashboard/demo-login.json` containing `{ "email": "demo@ghost-buster.test",
 "password": "<DEMO_PASSWORD>" }` and redeploy hosting. The demo role can read
-everything and drive only rooms flagged `demo: true`. It cannot touch real
-bookings.
+every room and booking, and drive or book only rooms flagged `demo: true`. It
+cannot touch real bookings. `.gitignore` keeps that file out of the repo.
+
+**Check who can sign up.** The web config is public, so unless sign-up is turned
+off, anyone can create an account through the Auth API and book a real room. The
+dashboard has no sign-up form, but that does not stop the API. Look for the
+sign-up setting under **Authentication → Settings → User actions**; it may need
+the Identity Platform upgrade.
+
+### 5. Your rooms
+
+Real rooms are added by script, because clients cannot write rooms. The room ID
+is what goes in that room's edge device as `ROOM_ID`:
+
+```bash
+node scripts/add-room.js room_201 "Seminar Room 201" --capacity 30 --power 4.3 --project <id>
+```
+
+### 6. Push notifications (optional)
+
+Without this, warnings appear only in the dashboard. To reach owners who have
+no tab open:
+
+1. 🔑 In the Firebase console, open **Project settings → Cloud Messaging → Web
+   Push certificates** and generate a key pair.
+2. Put the public key in `dashboard/api-config.json` as `"vapidKey"` and run
+   `firebase deploy --only hosting`.
+
+Users then see **Turn on notifications** under "My bookings". The token is
+stored per user, so the browser that turned it on most recently gets the push.
+The demo account never registers one, because its login is shared.
 
 ### Edge device
 
@@ -267,10 +302,36 @@ python human_presence.py       # check detection on your camera
 python orchestrator.py         # run the full pipeline
 ```
 
+Use Python 3.11; the pinned MediaPipe and NumPy have no builds for much newer
+versions. Install from `requirements.txt` rather than taking the latest OpenCV:
+OpenCV 5 removed the HOG detector that the fallback uses.
+
+`orchestrator.py` refuses to start until `ROOM_ID`, `GHOST_BACKEND_URL` and
+`GHOST_HMAC_SECRET` are set, rather than queueing readings that can never arrive.
+
+**Keep it running.** A device that stops goes silent, and the backend treats a
+silent room as empty, so bookings there get warned and reclaimed even with people
+inside. [`edge_ai/ghost-edge.service`](edge_ai/ghost-edge.service) is a systemd
+unit that restarts it after a crash or reboot; the install steps are at the top
+of that file. It has not been run on a real device yet.
+
+**Give each device its own key.** Keep the master secret on Vercel and put this
+in the device's `.env` as `GHOST_HMAC_SECRET`:
+
+```bash
+cd backend
+GHOST_HMAC_SECRET=<master secret from Vercel> npm run device-key -- room_201
+```
+
+A device using its room's key can sign for that room and no other. The master
+secret also still works as a signing key, so existing devices keep running while
+you move them over. When all of them are done, set
+`GHOST_REQUIRE_DEVICE_KEYS=true` in Vercel to stop accepting it.
+
 No camera? This sends the same signed payloads:
 
 ```bash
-GHOST_HMAC_SECRET=<value from Vercel> node backend/scripts/simulate.js room_101=vacant \
+GHOST_HMAC_SECRET=<room_101's device key> node backend/scripts/simulate.js room_101=vacant \
   --every 300 --api https://<your-app>.vercel.app/api
 ```
 
@@ -331,7 +392,7 @@ is about 40 KB, and the Firebase SDK loads from Google's CDN.
 ```bash
 cd backend
 npm run lint
-npm test                 # starts Firestore + Auth emulators, runs all Node tests
+npm test                 # starts Firestore + Auth emulators, runs all Node tests (needs port 8080)
 npm run test:unit        # pure logic only, no emulator
 npm run dev              # emulators + local API on http://127.0.0.1:5100/api, no scripted story
 
@@ -339,9 +400,22 @@ python -m pytest edge_ai/tests
 ```
 
 The emulator suite covers the ghost path, the confirm path (with real ID
-tokens), presence clearing a warning, replay and forgery, devices going
-offline, booking overlaps, the demo permissions, and the Vercel endpoints
-themselves: cron secret, CORS allowlist, and method and status mapping.
+tokens), presence clearing a warning, re-warning after an answer, a reclaim that
+finds someone in the room, replay and forgery, per-room keys, devices going offline, booking overlaps, the demo
+permissions, the Vercel endpoints themselves (cron secret, CORS allowlist,
+method and status mapping), and `firestore.rules` as a signed-in client would
+hit them. The edge suite covers the debounce, signing, how backend responses
+are classified, the offline queue, and when a device may send at all.
+
+**"Could not start Firestore Emulator, port taken" on Windows.** The emulator's
+Java process can outlive `firebase emulators:exec`, even after a clean shutdown,
+so the next `npm test` or `npm run demo` finds port 8080 in use. Find it and stop
+it (PowerShell):
+
+```powershell
+Get-NetTCPConnection -LocalPort 8080 -State Listen | Select-Object OwningProcess
+Stop-Process -Id <that PID>
+```
 
 Tests run with `--no-experimental-require-module`, and `test/runtime.test.js`
 loads every function in a fresh process the way Vercel does. Code that
@@ -357,20 +431,24 @@ others, fails CI instead of production. CI takes its Node version from
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `GHOST_HMAC_SECRET` | — | **Required.** Must equal the value in Vercel |
+| `GHOST_HMAC_SECRET` | — | **Required.** This room's key from `npm run device-key` (or the master secret from Vercel) |
 | `GHOST_BACKEND_URL` | — | **Required.** `https://<your-app>.vercel.app/api/occupancy` |
-| `ROOM_ID` | `room_unknown` | Room this device monitors (must exist in `rooms/`) |
+| `ROOM_ID` | — | **Required.** Room this device monitors (must exist in `rooms/`) |
+| `DEVICE_INDEX_NUM` | `0` | Which camera to open |
 | `GHOST_CAPTURE_INTERVAL` | `2.0` | Seconds between frames |
 | `GHOST_WINDOW_SIZE` | `10` | Debounce window |
 | `GHOST_FLIP_THRESHOLD` | `7` | Frames that must agree to flip state |
+| `GHOST_MIN_CONFIDENCE` | `0.3` | HOG fallback only: minimum score to count as a person |
 | `GHOST_HEARTBEAT_SECONDS` | `300` | Resend interval, so silence means "offline". State changes are sent immediately |
+| `GHOST_MAX_QUEUE_AGE_SECONDS` | `280` | Keep retrying a failed reading this long. Keep it under the backend's 5-minute limit |
 
 **API** (Vercel environment variables):
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `FIREBASE_SERVICE_ACCOUNT` | — | **Required.** Service account key JSON |
-| `GHOST_HMAC_SECRET` | — | **Required.** Shared with the edge devices |
+| `GHOST_HMAC_SECRET` | — | **Required.** Master secret that device keys are derived from |
+| `GHOST_REQUIRE_DEVICE_KEYS` | off | `true` refuses readings signed with the master secret itself |
 | `CRON_SECRET` | — | **Required.** Bearer token cron-job.org sends |
 | `ALLOWED_ORIGINS` | — | **Required.** Comma-separated Hosting origins allowed to call the API |
 | `GHOST_STALE_SECONDS` | `720` | Silence after which a device counts as offline |
@@ -398,9 +476,7 @@ to make that assessment straightforward.
 
 ## Roadmap
 
-**Next:** a PWA that registers for push, per-device signing keys, and
-re-checking a booking after its owner confirms.
-**Then:** Google Calendar and Outlook integration, and smart-plug control so
+**Next:** Google Calendar and Outlook integration, and smart-plug control so
 the energy figure is measured instead of estimated.
 **Later:** multi-tenancy, an accuracy benchmark over real classrooms, and a
 hardware BOM with a cost-per-room payback model.

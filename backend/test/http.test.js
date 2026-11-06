@@ -25,7 +25,7 @@ after(() => {
 beforeEach(h.resetEmulators);
 
 /** Invoke a handler with a Vercel-style request/response pair. */
-function call(handler, { method = 'POST', headers = {}, body = {} } = {}) {
+function call(handler, { method = 'POST', headers = {}, body = {}, bodyError } = {}) {
   return new Promise((resolve) => {
     const out = { headers: {} };
     const res = {
@@ -43,7 +43,15 @@ function call(handler, { method = 'POST', headers = {}, body = {} } = {}) {
         return this;
       },
     };
-    handler({ method, headers, body }, res);
+    const req = { method, headers };
+    // Vercel parses the body lazily, and reading req.body throws on bad JSON.
+    Object.defineProperty(req, 'body', {
+      get() {
+        if (bodyError) throw bodyError;
+        return body;
+      },
+    });
+    handler(req, res);
   });
 }
 
@@ -87,6 +95,18 @@ describe('POST /api/occupancy', () => {
     assert.equal((await call(occupancy, { body: forged })).status, 401);
     assert.equal((await call(occupancy, { body: {} })).status, 400);
     assert.equal((await call(occupancy, { method: 'GET' })).status, 405);
+  });
+
+  test('a signature with a non-ASCII character is a 401, not a 500', async () => {
+    await h.addRoom('room_101');
+    const body = { ...h.signedPayload('room_101', 'vacant'), signature: `${'a'.repeat(63)}é` };
+    assert.equal((await call(occupancy, { body })).status, 401);
+  });
+
+  test('a body that is not valid JSON is a 400, not a 500', async () => {
+    const bodyError = Object.assign(new Error('Invalid JSON'), { statusCode: 400 });
+    const res = await call(occupancy, { bodyError });
+    assert.equal(res.status, 400);
   });
 });
 

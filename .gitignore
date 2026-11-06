@@ -7,6 +7,7 @@ serviceAccountKey.json
 *service-account*.json
 .env*.local
 backend/.runtimeconfig.json
+dashboard/demo-login.json
 
 # Vercel CLI link and pulled env files
 .vercel/

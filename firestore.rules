@@ -11,8 +11,8 @@ rules_version = '2';
 // Roles are custom claims, set with backend/scripts/set-role.js:
 //   admin  full read access
 //   demo   same read access, for the public demo login. It has no extra
-//          write power; the demo panel calls demoAction, which only touches
-//          rooms flagged demo: true.
+//          write power; the demo panel calls POST /api/demo, which only
+//          touches rooms flagged demo: true.
 
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -42,11 +42,12 @@ service cloud.firestore {
 
     // ---- Bookings ----------------------------------------------------
     // Created only through POST /api/bookings (overlap check).
-    // An owner may cancel their own booking and change nothing else.
+    // An owner may cancel their own live booking and change nothing else.
     match /bookings/{bookingId} {
       allow read:   if isStaff() || isOwner(resource.data);
       allow create: if false;
       allow update: if isOwner(resource.data)
+                    && resource.data.status in ['scheduled', 'active']
                     && request.resource.data.status == 'canceled'
                     && request.resource.data.diff(resource.data)
                          .affectedKeys().hasOnly(['status']);
@@ -85,14 +86,18 @@ service cloud.firestore {
     }
 
     // ---- Users -------------------------------------------------------
+    // Private to their owner. Staff get no access: the demo role's password
+    // is public, and this is where push tokens live.
     match /users/{userId} {
-      allow read: if isStaff() || (isSignedIn() && request.auth.uid == userId);
+      allow read: if isSignedIn() && request.auth.uid == userId;
       // A user may register their own FCM token but nothing else.
       allow update: if isSignedIn()
                     && request.auth.uid == userId
                     && request.resource.data.diff(resource.data)
                          .affectedKeys().hasOnly(['fcmToken']);
-      allow create: if isSignedIn() && request.auth.uid == userId;
+      allow create: if isSignedIn()
+                    && request.auth.uid == userId
+                    && request.resource.data.keys().hasOnly(['fcmToken']);
       allow delete: if false;
     }
 

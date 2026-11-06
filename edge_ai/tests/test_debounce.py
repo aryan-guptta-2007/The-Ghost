@@ -45,6 +45,11 @@ def test_flips_back_when_person_returns(monkeypatch):
     assert verdicts[-1]["changed"] is True
 
 
+def test_not_settled_until_the_window_holds_enough_evidence(monkeypatch):
+    verdicts = run(monkeypatch, [True] * 7)
+    assert [v["settled"] for v in verdicts] == [False] * 6 + [True]
+
+
 def test_threshold_cannot_exceed_window(monkeypatch):
     monkeypatch.setattr(human_presence, "_build_backend", lambda: ScriptedBackend([]))
     with pytest.raises(ValueError):

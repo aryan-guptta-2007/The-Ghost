@@ -1,7 +1,7 @@
 # Edge device dependencies (Raspberry Pi 4 / Jetson Nano / laptop)
 opencv-python==4.9.0.80
 numpy==1.26.4
-requests==2.31.0
+requests==2.32.4
 
 # Preferred detection backend. If this fails to install on your board,
 # the code automatically falls back to OpenCV's built-in HOG detector.

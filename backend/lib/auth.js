@@ -41,4 +41,22 @@ function isStaff(token) {
   return token.admin === true || token.demo === true;
 }
 
-module.exports = { HttpError, verifyBearer, verifySharedSecret, isStaff };
+/** True if Firestore would accept this as a document ID. */
+function isDocId(value) {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= 500 &&
+    !value.includes('/') &&
+    value !== '.' &&
+    value !== '..' &&
+    !/^__.*__$/.test(value)
+  );
+}
+
+/** Client-supplied IDs go straight into doc(), which throws on bad ones. */
+function requireId(value, name) {
+  if (!isDocId(value)) throw new HttpError(400, `Missing or invalid ${name}`);
+}
+
+module.exports = { HttpError, verifyBearer, verifySharedSecret, isStaff, isDocId, requireId };

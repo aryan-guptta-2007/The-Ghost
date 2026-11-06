@@ -12,7 +12,7 @@
 */
 
 const { db, Timestamp } = require('./lib/firebase');
-const { HttpError, isStaff } = require('./lib/auth');
+const { HttpError, isStaff, requireId } = require('./lib/auth');
 const { ACTIVE_STATUSES } = require('./lib/config');
 const { writeReading, evaluateReading } = require('./occupancy');
 const { createBookingLogic } = require('./create_booking');
@@ -21,7 +21,7 @@ const DEMO_POLICY = { demo: true, graceSeconds: 30, confirmWindowSeconds: 60 };
 
 async function demoLogic(token, { roomId, action }) {
   if (!isStaff(token)) throw new HttpError(403, 'Demo controls need an admin or demo account');
-  if (!roomId) throw new HttpError(400, 'Missing roomId');
+  requireId(roomId, 'roomId');
   const room = await db.collection('rooms').doc(roomId).get();
   if (!room.exists || room.get('demo') !== true) throw new HttpError(403, 'Not a demo room');
 

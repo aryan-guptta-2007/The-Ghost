@@ -13,7 +13,9 @@
     "demo": "firebase emulators:exec --only auth,firestore,hosting --project demo-ghost-buster --ui \"node scripts/demo.js\"",
     "seed": "node scripts/seed.js",
     "simulate": "node scripts/simulate.js",
-    "set-role": "node scripts/set-role.js"
+    "set-role": "node scripts/set-role.js",
+    "add-room": "node scripts/add-room.js",
+    "device-key": "node scripts/device-key.js"
   },
   "dependencies": {
     "firebase-admin": "^13.10.0"

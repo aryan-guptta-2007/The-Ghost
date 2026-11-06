@@ -4,7 +4,8 @@
   (There are no Firestore triggers on Vercel, so the judging that used to
   run in a handleOccupancy trigger now runs right after the write.)
 
-    1. Verify the HMAC-SHA256 signature with the shared secret.
+    1. Verify the HMAC-SHA256 signature: the room's own device key, or the
+       master secret unless GHOST_REQUIRE_DEVICE_KEYS is on.
     2. Reject payloads outside a 5-minute freshness window, and any reading
        that is not newer than the room's last one. That second rule stops
        exact replays and stale out-of-order deliveries without storing a doc
@@ -21,9 +22,9 @@
 */
 
 const { db, Timestamp } = require('./lib/firebase');
-const { HttpError } = require('./lib/auth');
-const { verifySignature } = require('./lib/hmac');
-const { MAX_CLOCK_SKEW_SECONDS } = require('./lib/config');
+const { HttpError, isDocId } = require('./lib/auth');
+const { verifySignature, deviceKey } = require('./lib/hmac');
+const { MAX_CLOCK_SKEW_SECONDS, requireDeviceKeys } = require('./lib/config');
 const {
   findActiveBooking,
   graceElapsed,
@@ -33,8 +34,7 @@ const {
 
 /** ISO-8601 string, or UNIX seconds from older edge builds. */
 function parseTimestamp(raw) {
-  if (typeof raw === 'number') return new Date(raw * 1000);
-  const d = new Date(raw);
+  const d = new Date(typeof raw === 'number' ? raw * 1000 : raw);
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
@@ -73,14 +73,20 @@ async function evaluateReading({ roomId, humanPresent }, now = Timestamp.now()) 
   return created ? 'warned' : 'already_warned';
 }
 
+/** Signed with this room's device key, or (while allowed) the master secret. */
+function signatureValid(payload, masterSecret) {
+  if (verifySignature(payload, deviceKey(masterSecret, payload.room_id))) return true;
+  return !requireDeviceKeys() && verifySignature(payload, masterSecret);
+}
+
 /** Validate, store and judge a signed payload. Throws HttpError on rejection. */
 async function receiveReading(payload, secret, nowMs = Date.now()) {
   const { room_id: roomId, status, confidence, timestamp } = payload || {};
 
-  if (!roomId || !['occupied', 'vacant'].includes(status) || timestamp === undefined) {
+  if (!isDocId(roomId) || !['occupied', 'vacant'].includes(status) || timestamp === undefined) {
     throw new HttpError(400, 'Missing or invalid room_id, status or timestamp');
   }
-  if (!verifySignature(payload, secret)) {
+  if (!signatureValid(payload, secret)) {
     console.warn(`Rejected unsigned/forged payload for room ${roomId}`);
     throw new HttpError(401, 'Invalid signature');
   }

@@ -3,6 +3,7 @@
   The reclaim step, run by scheduler.js on every cron call (every minute).
 
   For every confirmation still 'pending' after expiresAt:
+    - if the room has seen a person since the warning, clear it instead
     - cancel the booking (if it is still running)
     - mark the enforcement record 'reclaimed'
     - write audit_logs/ghost_{bookingId} with the energy saved, computed as
@@ -19,6 +20,17 @@ const { ACTIVE_STATUSES, DEFAULT_ROOM_KW, energySavedKwh } = require('./lib/conf
 const { statsRef } = require('./lib/enforcement');
 const { logDecision } = require('./decision_logger');
 
+/**
+ * Normally a person walking in clears the warning as the reading arrives. If
+ * judging that reading failed, the edge's retry gets 409 and counts it as
+ * delivered, so nothing else would stop the reclaim. Cancelling a booking
+ * that is in use is the worst mistake this system can make, so check here.
+ */
+function personSeenSince(room, warnedAt) {
+  const last = room.exists ? room.get('lastReading') : null;
+  return Boolean(last && last.humanPresent && last.timestamp.toMillis() > warnedAt.toMillis());
+}
+
 /** Reclaims one expired confirmation. Returns the audit entry, or null. */
 async function reclaimOne(confirmationRef, now) {
   return db.runTransaction(async (tx) => {
@@ -32,13 +44,20 @@ async function reclaimOne(confirmationRef, now) {
     const enforcementRef = db.collection('enforcement').doc(bookingId);
     const [booking, room, enforcement] = await tx.getAll(bookingRef, roomRef, enforcementRef);
 
-    // ---------- THEN ALL WRITES ----------
-    tx.update(confirmationRef, { status: 'expired', resolvedAt: now });
-
     const stillRunning =
       booking.exists &&
       ACTIVE_STATUSES.includes(booking.get('status')) &&
       booking.get('endTime').toMillis() > now.toMillis();
+
+    // ---------- THEN ALL WRITES ----------
+    if (stillRunning && personSeenSince(room, conf.get('createdAt'))) {
+      tx.update(confirmationRef, { status: 'cleared', resolvedAt: now });
+      if (enforcement.exists) tx.update(enforcementRef, { status: 'cleared', resolvedAt: now });
+      tx.set(statsRef(), { warningsCleared: FieldValue.increment(1) }, { merge: true });
+      return { cleared: true, bookingId, roomId };
+    }
+
+    tx.update(confirmationRef, { status: 'expired', resolvedAt: now });
 
     const powerKw = (room.exists && room.get('powerKw')) || DEFAULT_ROOM_KW;
     const remainingMs = stillRunning ? booking.get('endTime').toMillis() - now.toMillis() : 0;
@@ -50,7 +69,7 @@ async function reclaimOne(confirmationRef, now) {
         cancelledAt: now,
         cancelReason: 'ghost_reclaimed',
       });
-      tx.set(roomRef, { lastReclaimAt: now }, { merge: true });
+      if (room.exists) tx.update(roomRef, { lastReclaimAt: now });
       tx.set(
         statsRef(),
         {
@@ -97,7 +116,9 @@ async function cancelUnconfirmedBookingsLogic(now = Timestamp.now()) {
   for (const doc of expired.docs) {
     try {
       const audit = await reclaimOne(doc.ref, now);
-      if (audit && audit.bookingCancelled) {
+      if (audit && audit.cleared) {
+        await logDecision('JudgeAgent', 'cleared', 'Person detected after warning', audit.roomId, audit.bookingId);
+      } else if (audit && audit.bookingCancelled) {
         reclaimed += 1;
         await logDecision(
           'ReclaimAgent',

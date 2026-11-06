@@ -18,6 +18,7 @@ import {
   connectAuthEmulator,
   onAuthStateChanged,
   signInWithEmailAndPassword,
+  sendPasswordResetEmail,
   signOut,
 } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js';
 import {
@@ -30,12 +31,15 @@ import {
   orderBy,
   limit,
   onSnapshot,
+  setDoc,
   updateDoc,
 } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js';
 
 const LOCAL = ['localhost', '127.0.0.1'].includes(location.hostname);
 const EMULATOR_DEMO = { email: 'demo@ghost-buster.test', password: 'ghostdemo' };
 const RECENT_RECLAIM_MS = 10 * 60 * 1000;
+const LIVE_STATUSES = ['scheduled', 'active'];
+const FIREBASE_MESSAGING = 'https://www.gstatic.com/firebasejs/12.19.0/firebase-messaging.js';
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, className, text) => {
@@ -48,7 +52,18 @@ const el = (tag, className, text) => {
 // ---------------------------------------------------------------------
 // Firebase
 // ---------------------------------------------------------------------
-const config = await fetch('/__/firebase/init.json').then((r) => r.json());
+// Without this config nothing else can run, so say so instead of showing a
+// blank page.
+const config = await fetch('/__/firebase/init.json')
+  .then((r) => {
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json();
+  })
+  .catch((err) => {
+    $('boot-error').textContent = 'The dashboard could not load its configuration. Check your connection and reload.';
+    $('boot-error').hidden = false;
+    throw err;
+  });
 const app = initializeApp(config);
 const auth = getAuth(app);
 const db = getFirestore(app);
@@ -64,6 +79,9 @@ const apiConfig = LOCAL
   : await fetch('api-config.json').then((r) => (r.ok ? r.json() : {})).catch(() => ({}));
 const API_BASE = (apiConfig.apiBase || '').replace(/\/$/, '');
 const STALE_MS = (apiConfig.staleSeconds || 720) * 1000;
+// Web push certificate from Firebase console -> Cloud Messaging. Push stays
+// off until it is set; warnings still show in "My bookings".
+const VAPID_KEY = apiConfig.vapidKey || '';
 
 async function api(path, body) {
   if (!API_BASE) throw new Error('Set apiBase in dashboard/api-config.json to your Vercel URL');
@@ -90,7 +108,7 @@ function toast(message) {
 // ---------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------
-const state = {
+const emptyState = () => ({
   rooms: new Map(),         // roomId -> room
   bookings: new Map(),      // bookingId -> active booking (staff)
   enforcement: new Map(),   // bookingId -> enforcement record (staff)
@@ -99,9 +117,11 @@ const state = {
   myBookings: [],
   stats: {},
   feed: [],
-};
+});
+let state = emptyState();
 let unsubscribers = [];
 let staff = false;
+let demoOnly = false; // the demo account can book demo rooms only
 
 function listen(q, onData) {
   unsubscribers.push(
@@ -118,6 +138,7 @@ function startListeners(uid) {
   listen(collection(db, 'rooms'), (s) => {
     state.rooms = toMap(s);
     renderRoomOptions();
+    renderMyBookings(); // room names may arrive after the bookings do
     render();
   });
   listen(query(collection(db, 'confirmations'), where('userId', '==', uid), where('status', '==', 'pending')), (s) => {
@@ -320,19 +341,29 @@ const warningCards = new Map(); // confirmationId -> { card, title, countdown }
 function renderWarnings() {
   const box = $('my-warnings');
   const now = Date.now();
-  const live = new Set(state.myWarnings.map((w) => w.id));
+  // A warning stays pending until the next reclaim run even if its booking
+  // has already ended, for example because the owner cancelled it.
+  const warnings = state.myWarnings.filter((w) => {
+    const booking = state.myBookings.find((b) => b.id === w.bookingId);
+    return !booking || LIVE_STATUSES.includes(booking.status);
+  });
+  const live = new Set(warnings.map((w) => w.id));
   for (const [id, w] of warningCards) {
     if (!live.has(id)) {
       w.card.remove();
       warningCards.delete(id);
     }
   }
-  for (const w of state.myWarnings) {
+  for (const w of warnings) {
     if (!warningCards.has(w.id)) warningCards.set(w.id, buildWarning(w, box));
     const parts = warningCards.get(w.id);
     const room = state.rooms.get(w.roomId);
+    const left = w.expiresAt.toMillis() - now;
     parts.title.textContent = `Your booking for ${room ? room.name : w.roomId} looks empty`;
-    parts.countdown.textContent = `It will be released in ${clock(w.expiresAt.toMillis() - now)} unless you confirm you are there.`;
+    parts.countdown.textContent = left > 0
+      ? `It will be released in ${clock(left)} unless you confirm you are there.`
+      : 'Time is up. This booking is being released.';
+    if (left <= 0) parts.btn.disabled = true; // the API would answer 410
   }
 }
 
@@ -356,7 +387,7 @@ function buildWarning(w, box) {
   });
   card.append(text, btn);
   box.append(card);
-  return { card, title, countdown };
+  return { card, title, countdown, btn };
 }
 
 function renderMyBookings() {
@@ -374,10 +405,12 @@ function renderMyBookings() {
     const start = b.startTime.toDate();
     const end = b.endTime.toDate();
     const when = `${start.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}–${end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-    const status = b.cancelReason === 'ghost_reclaimed' ? 'released (no one showed up)' : b.status;
+    const running = LIVE_STATUSES.includes(b.status) && b.endTime.toMillis() > now;
+    const ended = LIVE_STATUSES.includes(b.status) && !running; // waiting for the next sweep
+    const status = b.cancelReason === 'ghost_reclaimed' ? 'released (no one showed up)' : ended ? 'completed' : b.status;
     info.append(el('div', '', room ? room.name : b.roomId), el('div', 'sub', `${when} · ${status}`));
     li.append(info);
-    if (b.status === 'scheduled' && b.endTime.toMillis() > now) {
+    if (running) {
       const cancel = el('button', 'ghost-btn', 'Cancel');
       cancel.type = 'button';
       cancel.addEventListener('click', async () => {
@@ -400,6 +433,7 @@ function renderRoomOptions() {
   const current = select.value;
   select.replaceChildren(
     ...[...state.rooms.values()]
+      .filter((r) => r.demo || !demoOnly)
       .sort((a, b) => a.id.localeCompare(b.id))
       .map((r) => {
         const o = el('option', '', r.name || r.id);
@@ -448,7 +482,71 @@ $('login-form').addEventListener('submit', async (e) => {
   }
 });
 
+$('forgot-password').addEventListener('click', async () => {
+  const email = $('login-email').value.trim();
+  $('login-error').textContent = '';
+  if (!email) {
+    $('login-error').textContent = 'Enter your email first.';
+    return;
+  }
+  try {
+    await sendPasswordResetEmail(auth, email);
+  } catch (err) {
+    // Only a malformed address is worth reporting. Saying "no such user"
+    // would tell anyone which addresses have accounts.
+    if (err.code === 'auth/invalid-email') {
+      $('login-error').textContent = 'That email address does not look right.';
+      return;
+    }
+    if (err.code !== 'auth/user-not-found') console.error(err);
+  }
+  toast('If that address has an account, a reset link is on its way.');
+});
+
 $('sign-out').addEventListener('click', () => signOut(auth));
+
+// ---------------------------------------------------------------------
+// Push notifications
+// ---------------------------------------------------------------------
+const pushAvailable = () => Boolean(VAPID_KEY) && 'serviceWorker' in navigator && 'Notification' in window;
+
+/** Gets this browser's FCM token and stores it where the backend looks for it. */
+async function registerForPush(uid) {
+  const { getMessaging, getToken, isSupported } = await import(FIREBASE_MESSAGING);
+  if (!(await isSupported())) throw new Error('This browser does not support push notifications');
+  const serviceWorkerRegistration = await navigator.serviceWorker.register('sw.js');
+  await navigator.serviceWorker.ready;
+  const fcmToken = await getToken(getMessaging(app), { vapidKey: VAPID_KEY, serviceWorkerRegistration });
+  await setDoc(doc(db, 'users', uid), { fcmToken }, { merge: true });
+}
+
+$('enable-push').addEventListener('click', async () => {
+  const button = $('enable-push');
+  button.disabled = true;
+  try {
+    if ((await Notification.requestPermission()) !== 'granted') {
+      toast('Notifications are blocked. Warnings will still appear here.');
+      return;
+    }
+    await registerForPush(auth.currentUser.uid);
+    button.hidden = true;
+    toast('Notifications are on.');
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+/** Offer push to people who have not answered yet; refresh the token for those who said yes. */
+function setUpPush(user, claims) {
+  // The demo login is shared, so a token on it would reach whoever used it last.
+  const usable = pushAvailable() && !claims.demo;
+  $('enable-push').hidden = !usable || Notification.permission !== 'default';
+  if (usable && Notification.permission === 'granted') {
+    registerForPush(user.uid).catch((err) => console.error('Push registration failed:', err));
+  }
+}
 
 // The demo button appears on localhost (emulator account) or when the
 // deployment ships a demo-login.json with a read-only demo account.
@@ -472,6 +570,14 @@ onAuthStateChanged(auth, async (user) => {
   timers = [];
   cards.forEach((c) => c.li.remove());
   cards.clear();
+  // Nothing from the previous user may survive into the next session.
+  warningCards.forEach((w) => w.card.remove());
+  warningCards.clear();
+  state = emptyState();
+  staff = false;
+  demoOnly = false;
+  $('my-bookings').replaceChildren();
+  $('feed').replaceChildren();
 
   $('login-view').hidden = !!user;
   $('app-view').hidden = !user;
@@ -480,10 +586,12 @@ onAuthStateChanged(auth, async (user) => {
 
   const { claims } = await user.getIdTokenResult();
   staff = claims.admin === true || claims.demo === true;
+  demoOnly = claims.demo === true && claims.admin !== true;
   $('who-email').textContent = user.email;
   $('who-role').textContent = claims.admin ? 'admin' : claims.demo ? 'demo' : 'member';
   $('staff').hidden = !staff;
   $('book-start').value = defaultStart();
+  setUpPush(user, claims);
 
   startListeners(user.uid);
   // Countdowns tick every second without waiting for a snapshot.

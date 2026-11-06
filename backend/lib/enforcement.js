@@ -11,8 +11,11 @@
                      -> both docs move to 'cleared'
     POST /api/confirm and the reclaim job (cron) close the loop.
 
-  Both docs are keyed by bookingId, so a booking is warned at most once no
-  matter how many readings or sweeps notice it.
+  Both docs are keyed by bookingId, so one warning stays one warning no
+  matter how many readings or sweeps notice it. A warning that was answered
+  can be followed by a new one once a full grace period has passed, so an
+  owner who confirms and then leaves does not keep the room for the whole
+  slot. See canWarn().
 */
 
 const { db, FieldValue, Timestamp, getMessaging } = require('./firebase');
@@ -44,8 +47,20 @@ function graceElapsed(booking, now) {
 }
 
 /**
+ * May this booking be warned now? Yes if it has never been warned, or if the
+ * last warning was answered at least a grace period ago. A warning that is
+ * still open, or one that ended in a reclaim, is final.
+ */
+function canWarn(enforcement, booking, now) {
+  if (!enforcement.exists) return true;
+  if (!['confirmed', 'cleared'].includes(enforcement.get('status'))) return false;
+  const { graceSeconds } = policyFor(booking);
+  return now.toMillis() - enforcement.get('resolvedAt').toMillis() >= graceSeconds * 1000;
+}
+
+/**
  * Warn the owner of an apparently empty booking. Returns true if this call
- * created the warning, false if it already existed or the booking ended.
+ * created the warning, false if one is not due or the booking ended.
  */
 async function flagGhost(bookingDoc, reason, source, now) {
   const booking = bookingDoc.data();
@@ -59,7 +74,7 @@ async function flagGhost(bookingDoc, reason, source, now) {
 
   const created = await db.runTransaction(async (tx) => {
     const [existing, fresh] = await tx.getAll(enforcementRef, bookingDoc.ref);
-    if (existing.exists) return false;
+    if (!canWarn(existing, booking, now)) return false;
     if (!fresh.exists || !ACTIVE_STATUSES.includes(fresh.get('status'))) return false;
 
     tx.set(enforcementRef, {
