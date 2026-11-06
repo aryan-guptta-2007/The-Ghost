@@ -67,9 +67,14 @@ async function sweepActiveBookingsLogic(now = Timestamp.now()) {
   for (const doc of running) {
     result.checked += 1;
     const reason = ghostReason(rooms.get(doc.get('roomId')), now);
-    if (reason && (await flagGhost(doc, reason, 'sweep', now))) {
-      result.flagged += 1;
-      console.log(`[sweep] warned booking ${doc.id} in ${doc.get('roomId')}: ${reason}`);
+    try {
+      if (reason && (await flagGhost(doc, reason, 'sweep', now))) {
+        result.flagged += 1;
+        console.log(`[sweep] warned booking ${doc.id} in ${doc.get('roomId')}: ${reason}`);
+      }
+    } catch (err) {
+      // The next sweep tries this one again; the rest should not wait for it.
+      console.error(`[sweep] failed on booking ${doc.id}:`, err);
     }
   }
   return result;

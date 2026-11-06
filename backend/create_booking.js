@@ -11,7 +11,7 @@
 */
 
 const { db, Timestamp } = require('./lib/firebase');
-const { HttpError } = require('./lib/auth');
+const { HttpError, requireId } = require('./lib/auth');
 const { ACTIVE_STATUSES, MIN_BOOKING_MINUTES, MAX_BOOKING_MINUTES } = require('./lib/config');
 
 const MAX_ADVANCE_DAYS = 30;
@@ -23,7 +23,7 @@ const BACKDATE_TOLERANCE_MS = 5 * 60 * 1000;
  * same slot. `extra` lets demoAction add demo-only fields.
  */
 async function createBookingLogic(uid, { roomId, startTime, durationMinutes }, extra = {}, nowMs = Date.now()) {
-  if (!roomId || typeof roomId !== 'string') throw new HttpError(400, 'Missing roomId');
+  requireId(roomId, 'roomId');
   const start = new Date(startTime);
   if (Number.isNaN(start.getTime())) throw new HttpError(400, 'Invalid startTime');
   const minutes = Number(durationMinutes);
@@ -70,4 +70,17 @@ async function createBookingLogic(uid, { roomId, startTime, durationMinutes }, e
   return { success: true, bookingId: bookingRef.id, startTime: start.toISOString(), endTime: endTs.toDate().toISOString() };
 }
 
-module.exports = { createBookingLogic };
+/**
+ * POST /api/bookings. The demo login's password is public, so that account
+ * gets demo rooms only; otherwise anyone could fill the real ones.
+ */
+async function bookAs(token, body) {
+  if (token.demo === true && token.admin !== true) {
+    requireId(body.roomId, 'roomId');
+    const room = await db.collection('rooms').doc(body.roomId).get();
+    if (room.get('demo') !== true) throw new HttpError(403, 'The demo account can only book demo rooms');
+  }
+  return createBookingLogic(token.uid, body);
+}
+
+module.exports = { createBookingLogic, bookAs };

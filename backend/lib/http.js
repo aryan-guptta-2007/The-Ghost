@@ -55,6 +55,8 @@ function endpoint(name, handler, { methods = ['POST'] } = {}) {
       return res.status(status).json(body);
     } catch (err) {
       if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
+      // Vercel parses the body on first access and throws this on bad JSON.
+      if (err.statusCode === 400) return res.status(400).json({ error: 'Invalid request body' });
       console.error(`${name}:`, err);
       return res.status(500).json({ error: 'Internal server error' });
     }

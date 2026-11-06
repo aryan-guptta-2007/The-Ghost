@@ -6,7 +6,9 @@
 const { db, FieldValue } = require('./lib/firebase');
 
 /**
- * Log a decision made by any agent.
+ * Log a decision made by any agent. Best effort: this runs after the decision
+ * has committed, so a failure here must not skip the push that follows it or
+ * tell an owner their confirmation failed.
  * @param {string} agentName - e.g. 'JudgeAgent', 'EnforcerAgent', 'ReclaimAgent'
  * @param {string} decision - short action name, e.g. 'warned', 'reclaimed'
  * @param {string} reason   - why the decision was made (e.g., rule, confidence)
@@ -14,14 +16,18 @@ const { db, FieldValue } = require('./lib/firebase');
  * @param {string|null} bookingId - optional booking identifier
  */
 async function logDecision(agentName, decision, reason, roomId, bookingId = null) {
-  await db.collection('decision_logs').add({
-    agent_name: agentName,
-    decision,
-    reason,
-    room_id: roomId || null,
-    booking_id: bookingId,
-    timestamp: FieldValue.serverTimestamp(),
-  });
+  try {
+    await db.collection('decision_logs').add({
+      agent_name: agentName,
+      decision,
+      reason,
+      room_id: roomId || null,
+      booking_id: bookingId,
+      timestamp: FieldValue.serverTimestamp(),
+    });
+  } catch (err) {
+    console.error(`Could not log decision ${decision} for ${roomId}:`, err.message);
+  }
 }
 
 module.exports = { logDecision };

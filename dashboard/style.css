@@ -106,6 +106,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 }
 
 /* ---------- Login ---------- */
+.boot-error { padding: 28px; text-align: center; }
 .login { display: grid; place-items: center; min-height: 70vh; }
 .login-card { width: min(380px, 100%); padding: 28px; display: grid; gap: 14px; }
 

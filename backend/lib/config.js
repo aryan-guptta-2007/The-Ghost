@@ -19,6 +19,8 @@ function secret(name, devValue) {
 }
 const hmacSecret = () => secret('GHOST_HMAC_SECRET', 'local-dev-secret');
 const cronSecret = () => secret('CRON_SECRET', 'local-cron-secret');
+// Set once every device has its own key, to stop accepting the master secret.
+const requireDeviceKeys = () => process.env.GHOST_REQUIRE_DEVICE_KEYS === 'true';
 
 const envInt = (name, fallback) => {
   const n = Number.parseInt(process.env[name], 10);
@@ -76,6 +78,7 @@ function energySavedKwh(powerKw, remainingMs) {
 module.exports = {
   hmacSecret,
   cronSecret,
+  requireDeviceKeys,
   SWEEP_EVERY_MINUTES,
   GRACE_SECONDS,
   CONFIRM_WINDOW_SECONDS,

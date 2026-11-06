@@ -2,7 +2,7 @@
 
 const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
-const { canonicalJson, sign, verifySignature } = require('../lib/hmac');
+const { canonicalJson, sign, verifySignature, deviceKey } = require('../lib/hmac');
 const {
   policyFor,
   energySavedKwh,
@@ -44,6 +44,15 @@ describe('HMAC signing', () => {
     assert.equal(verifySignature(signed, 'test-secret'), true);
     assert.equal(verifySignature({ ...signed, status: 'occupied' }, 'test-secret'), false);
     assert.equal(verifySignature({ ...signed, signature: 'short' }, 'test-secret'), false);
+  });
+});
+
+describe('deviceKey', () => {
+  test('is stable, differs per room and per master, and is not the master', () => {
+    assert.equal(deviceKey('m', 'room_101'), deviceKey('m', 'room_101'));
+    assert.notEqual(deviceKey('m', 'room_101'), deviceKey('m', 'room_102'));
+    assert.notEqual(deviceKey('m', 'room_101'), deviceKey('n', 'room_101'));
+    assert.match(deviceKey('m', 'room_101'), /^[0-9a-f]{64}$/);
   });
 });
 

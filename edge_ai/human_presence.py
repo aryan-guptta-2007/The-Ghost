@@ -37,7 +37,9 @@ import numpy as np
 # ----------------------------------------------------------------------
 # Tunables — override via environment variables
 # ----------------------------------------------------------------------
-# Minimum per-frame confidence for a detection to count as a person.
+# Minimum per-frame confidence for a HOG detection to count as a person.
+# MediaPipe ignores this: its landmarks are themselves the detection, and
+# confidence only describes how much of the person it could see.
 MIN_CONFIDENCE = float(os.getenv("GHOST_MIN_CONFIDENCE", "0.3"))
 # Sliding window of recent frames used for the debounce decision.
 WINDOW_SIZE = int(os.getenv("GHOST_WINDOW_SIZE", "10"))
@@ -126,7 +128,13 @@ def _build_backend():
         return _MediaPipeBackend()
     except Exception as exc:
         print(f"[HumanPresence] MediaPipe unavailable ({exc}); using OpenCV HOG.")
+    try:
         return _HogBackend()
+    except AttributeError as exc:
+        raise RuntimeError(
+            "No detection backend available. Install the pinned versions: "
+            "pip install -r requirements.txt (OpenCV 5 has no HOGDescriptor)"
+        ) from exc
 
 
 class PresenceDetector:
@@ -169,6 +177,8 @@ class PresenceDetector:
             changed    : bool  — True only on the frame the state flipped
             raw        : bool  — this single frame's unfiltered detection
             samples    : int   — how many frames in the window so far
+            settled    : bool  — enough frames seen for `occupied` to be
+                                 evidence rather than the starting guess
         """
         raw, confidence = self._backend.detect(frame)
         self._window.append((raw, confidence))
@@ -198,6 +208,7 @@ class PresenceDetector:
             "changed": changed,
             "raw": raw,
             "samples": len(self._window),
+            "settled": len(self._window) >= self._threshold,
         }
 
     def close(self):
@@ -208,7 +219,7 @@ if __name__ == "__main__":
     # Smoke test against the webcam. Prints the debounced verdict live.
     import cv2
 
-    cap = cv2.VideoCapture(int(os.getenv("DEVICE_INDEX", "0")))
+    cap = cv2.VideoCapture(int(os.getenv("DEVICE_INDEX_NUM", "0")))
     detector = PresenceDetector()
     print(f"[HumanPresence] backend = {detector.backend_name}")
     try:

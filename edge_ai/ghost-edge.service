@@ -1,0 +1,29 @@
+# Keeps the edge device running across crashes and reboots. A device that stops
+# goes silent, and the backend treats a silent room as empty, so bookings in a
+# room with people in it would be warned and reclaimed.
+#
+# Change User and the paths to match your device, then:
+#   sudo cp ghost-edge.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ghost-edge
+#   journalctl -u ghost-edge -f
+
+[Unit]
+Description=Ghost Resource Buster edge device
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=pi
+# Needed to open the camera.
+SupplementaryGroups=video
+WorkingDirectory=/home/pi/The-Ghost/edge_ai
+EnvironmentFile=/home/pi/The-Ghost/.env
+# Without this, print() output reaches the journal late or not at all.
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/pi/The-Ghost/edge_ai/venv/bin/python orchestrator.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

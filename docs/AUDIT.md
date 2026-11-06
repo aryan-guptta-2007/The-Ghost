@@ -108,29 +108,94 @@ real credentials. Production uses REST; the emulator keeps gRPC.
 | **Every function crashed on Vercel with `ERR_REQUIRE_ESM`.** firebase-admin 14 verifies ID tokens through `jwks-rsa` 4, which `require()`s the ESM-only `jose` 6. My Node 22.17 and CI allow `require()` of ES modules, so the tests passed; Vercel's runtime did not. | Pinned firebase-admin to 13.10 (`jwks-rsa` 3 → `jose` 4, which ships CommonJS), with a `uuid` override to clear an advisory that comes with it. The tests now run with `--no-experimental-require-module`, and a runtime test loads each function in a fresh process. I confirmed that test fails with firebase-admin 14. CI reads its Node version from `engines.node`, as Vercel does. |
 | **Functions ran in Washington, D.C. (`iad1`) while Firestore is in Mumbai.** Vercel logged "Received in bom1, Routed to iad1": the request entered Vercel's network near the caller, then crossed to the default function region. Every Firestore round trip paid the US–India distance. | `"regions": ["bom1"]` in `backend/vercel.json`, so the region is part of every deploy rather than a dashboard setting. A cold-start log line prints the Node version and region actually used. |
 
+## Round 4: the paths nobody had walked
+
+The tests were green and the main loop worked, so this round went after what
+they never touched: the edge orchestrator, `firestore.rules`, and the dashboard
+in a real browser. I wrote a failing test for each backend and edge defect
+before fixing it.
+
+| # | What I found | Fix |
+|---|---|---|
+| 29 | **Rebooting a device let a ghost booking off.** The detector starts out "occupied" so it cannot accuse anyone, and the orchestrator sent that guess on its first frame. In an empty room, that cleared the open warning. | Verdicts carry `settled`, and nothing is sent until the window holds enough frames to be evidence. |
+| 30 | **One warning per booking, for good.** An owner could confirm once and leave, keeping the room for the whole slot. | `canWarn()` allows a new warning once the last answered one is a full grace period old. A warning that is open or ended in a reclaim stays final. |
+| 31 | **The offline queue gave up after about 15 seconds.** Five attempts at 1, 2, 4 and 8 seconds, when the backend would have accepted the reading for 5 minutes. It also retried rejections that could never succeed, and threw the reason away. | Retries run until the reading is about to go stale. A 4xx is dead-lettered at once with its reason. A failed flush stops at the first error, because 10 timeouts in a row froze capture for up to 100 seconds. |
+| 32 | **A misconfigured device ran forever.** Without `ROOM_ID` or `GHOST_BACKEND_URL` it queued readings that could never arrive and printed only "send failed". | `config_problems()` stops it at startup and says what is missing. |
+| 33 | **The public demo login could read every user's push token.** `users` was readable by staff, and the demo role counts as staff with a published password. | Users can read only their own document, and creating one is limited to `fcmToken`. |
+| 34 | An owner could rewrite a finished booking as cancelled. | The rule requires the booking to be live. |
+| 35 | A booking cancelled while warned could still be confirmed, which counted a confirmation for nothing, and its banner stayed on screen. | `confirmLogic` checks the booking and answers 409. The dashboard hides warnings on dead bookings. |
+| 36 | Reclaiming a booking for a deleted room recreated the room as a blank document. | Only an existing room is updated. |
+| 37 | Bad IDs (`a/b`, non-strings) and bad JSON came back as 500. | `requireId()` and `isDocId()`, and the wrapper maps Vercel's body error to 400. |
+| 38 | **Dashboard.** Members saw room IDs if bookings loaded before rooms. One user's data stayed in memory after sign-out. "I'm here" stayed clickable at 0:00 and answered 410. A failed config fetch gave a blank page. There was no favicon and no way to reset a password. | All fixed. Sign-out now resets everything. |
+| 39 | Nothing could create a real room: `seed.js` makes demo rooms only and clients cannot write rooms. | `scripts/add-room.js`. |
+| 40 | Smaller edge fixes: `human_presence.py` read a different camera variable from `camera_capture.py`, `.env.example` set a confidence threshold that differed from the default, and `requests` was on a version with a known advisory. | Aligned, and `requests` is now 2.32.4. A missing detector now gives a clear error. |
+
+Three items came off the known limitations:
+
+- **Per-room keys.** `deviceKey()` derives each room's key from the master
+  secret, which binds a key to its room with no storage and no extra read.
+  The master still verifies until `GHOST_REQUIRE_DEVICE_KEYS=true`, so devices
+  in the field keep working through a rollout.
+- **Re-checking after a confirm**, which is #30.
+- **Push.** The dashboard is installable, has a service worker, and registers
+  for FCM once `vapidKey` is set. FCM has no emulator, so see the limitation
+  below.
+
+`firestore.rules` had no tests at all, because the Admin SDK bypasses it.
+`test/rules.test.js` now calls the emulator as a signed-in client with real ID
+tokens.
+
+## Round 5: when a step fails halfway
+
+Round 4 walked the paths nobody had tried. This round asked what a failure
+leaves behind, and whether the README's promises were true. Each row has a test
+that failed before the fix.
+
+| # | What I found | Fix |
+|---|---|---|
+| 41 | **A person in the room could still lose the booking.** If a reading was stored but judging it failed, the edge's retry got 409, which counts as delivered. Nothing cleared the warning, so the reclaim cancelled a booking that was in use. | The reclaim job already reads the room, so it now checks `lastReading` and clears the warning if a person was seen after it was issued. A reading from before the warning does not count. |
+| 42 | **The public demo login could book real rooms.** `/api/bookings` had no role check, so the README's "cannot touch real bookings" was false: a demo token got 201 on a real room, up to 30 days ahead. | `bookAs()` limits that account to demo rooms, and the form offers only those. |
+| 43 | One failed transaction ended the whole sweep, so every booking after it waited 5 more minutes. | Each booking is handled on its own, as the reclaim job already did. |
+| 44 | Writing the decision log could fail after the decision had committed. That skipped the push, and told an owner whose confirmation had worked that it failed. | `logDecision` is best effort. The audit record is still written in the transaction. |
+| 45 | Two inputs still gave 500 after #37: a signature with a non-ASCII character, which needs no key because lengths were compared in characters and then in bytes, and a signed numeric timestamp too large for a date. | Bytes are compared, and numeric timestamps get the same validity check as strings. |
+| 46 | `.env.example`'s placeholder secret passed `config_problems()`, so a device copied from it ran forever and dead-lettered every reading as 401. This is #32 again. | The placeholder counts as not set. |
+| 47 | Hosting sent no `nosniff`, no referrer policy and no framing protection, so the login and "I'm here" could be framed by another site. | Headers in `firebase.json`. There is no script or connect CSP, because it would have to list production-only hosts I cannot exercise before a deploy. The headers did not appear in the local Hosting emulator in my tests, so check them with `curl -I` after deploying. |
+| 48 | Nothing restarted the edge device after a crash or reboot, and a silent device gets its room's bookings warned and reclaimed. | `edge_ai/ghost-edge.service`, a systemd unit. Not yet run on real hardware, so unlike the rows above it has no test. |
+
+I also went looking for missing composite indexes, because the emulator does not
+enforce them. Every query in the backend and dashboard has one.
+
 ## Where it stands
 
 | Layer | State | Done |
 |---|---|---|
 | Edge capture | Recovers from camera disconnects | 85% |
-| Presence detection | Works on my webcam; needs data from real rooms | 70% |
-| Edge transport | HMAC, offline queue, dead-letter, replay-safe | 90% |
+| Presence detection | Works on my webcam; needs data from real rooms | 75% |
+| Edge transport | HMAC, per-room keys, queue that outlasts an outage, dead-letter | 95% |
 | Backend ingest | Signature, freshness, replay, unknown-room checks | 95% |
-| Judging | Event-driven plus scheduled sweep | 90% |
-| Warn / confirm | Backend-driven, token-authenticated | 80% |
+| Judging | Event-driven plus scheduled sweep, re-checks after an answer | 95% |
+| Warn / confirm | Backend-driven, token-authenticated, web push once configured | 90% |
 | Room reclaim | Cancels, frees, records energy | 90% |
 | Energy | Estimated from rated draw, not metered; no real switching | 60% |
-| Bookings | API, form, seed script; no calendar integration | 70% |
-| Dashboard | Auth, live state, demo panel | 85% |
-| Tests / CI | Emulator + pytest suites (including the HTTP endpoints), Actions workflow | 85% |
+| Bookings | API, form, room and seed scripts; no calendar integration | 75% |
+| Dashboard | Auth, password reset, live state, demo panel, installable | 90% |
+| Tests / CI | Emulator, rules and pytest suites (including the HTTP endpoints), Actions workflow | 90% |
 
-About **80% of an MVP**, up from roughly 45% after round 1 and 25% at the start.
+About **90% of an MVP**, up from 80% after round 3, roughly 45% after round 1
+and 25% at the start. What remains needs hardware, field data or a calendar
+provider rather than more code in this repo.
 
 ## Known limitations
 
-- **One warning per booking.** If an owner confirms and then leaves for the rest
-  of the slot, the room is not re-checked. Fix: allow a new warning once the
-  previous one is older than the grace period.
+- **Re-warning is blunt when the camera is dead.** A confirmed owner in a room
+  with a silent device is asked again every grace period, because the backend
+  has no evidence either way.
+- **The demo login is shared, and so is its password.** Anyone who has it can
+  change it, because Firebase lets a signed-in user do that. Re-running
+  `seed.js` with `DEMO_PASSWORD` restores it.
+- **Sign-up may be open.** The web config is public, so unless sign-up is turned
+  off in the project, anyone can create a member account and book real rooms.
+  I have not confirmed which setting controls this on the Spark plan.
 - **Free-tier ceiling.** About 35 rooms on Firestore's Spark quota with
   two dashboards open. Vercel Hobby's 4 hours of Active CPU a month is the
   number to watch after the first real day. Hobby is also non-commercial
@@ -138,12 +203,13 @@ About **80% of an MVP**, up from roughly 45% after round 1 and 25% at the start.
 - **The REST transport is untested.** Production talks to Firestore over
   REST, but the emulator suite has to use gRPC, so the first real deploy is
   the first run of that path.
-- **Push needs a client.** The backend sends FCM to `users/{uid}.fcmToken`, but
-  nothing registers a token yet. Warnings show in the dashboard's "My bookings"
-  instead. A small PWA with a service worker would close this.
-- **One shared HMAC secret.** Every device signs with the same key, so a stolen
-  device could sign for any room. Per-device keys, bound to a room in Firestore,
-  are the fix.
+- **Push has never delivered a real notification.** The client is built, but
+  FCM has no emulator, so registering a token and receiving a push are untested
+  until a `vapidKey` is set on a real project. Each user also has one token, so
+  only their most recent browser gets the push, and signing out does not remove
+  it. Warnings always show in "My bookings" regardless.
+- **Device keys cannot be revoked one at a time.** They are derived, so replacing
+  one key means rotating the master secret and re-keying every device.
 - **Energy is estimated.** The figure is rated power × time released. Measuring
   it needs a smart plug or a BMS integration.
 - **The accuracy number is from one room.** [`BENCHMARK.md`](BENCHMARK.md) is a
