@@ -18,7 +18,7 @@ const ROUTES = Object.fromEntries(
     .map((f) => [`/api/${path.basename(f, '.js')}`, require(path.join(API_DIR, f))])
 );
 
-/** Gives Node's response the status()/json() helpers Vercel provides. */
+/** Gives Node's response the status()/json()/send() helpers Vercel provides. */
 function vercelish(res) {
   res.status = (code) => {
     res.statusCode = code;
@@ -27,6 +27,10 @@ function vercelish(res) {
   res.json = (body) => {
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify(body));
+    return res;
+  };
+  res.send = (body) => {
+    res.end(body);
     return res;
   };
   return res;

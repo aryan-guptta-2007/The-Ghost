@@ -53,18 +53,24 @@
           <div class="stat-note" id="stat-energy-note">Power draw × booking time released</div>
         </div>
         <div class="stat">
+          <div class="stat-label">CO₂ avoided</div>
+          <div class="stat-value"><span id="stat-carbon">0</span><span class="unit">kg</span></div>
+          <div class="stat-note" id="stat-money">₹0 saved (at ₹8/kWh)</div>
+        </div>
+        <div class="stat">
           <div class="stat-label">Ghost warnings sent</div>
           <div class="stat-value" id="stat-flagged">0</div>
+          <div class="stat-note">Enforcement triggered</div>
         </div>
         <div class="stat">
           <div class="stat-label">Rooms reclaimed</div>
           <div class="stat-value" id="stat-reclaimed">0</div>
-          <div class="stat-note" id="stat-hours"></div>
+          <div class="stat-note" id="stat-hours">0 room-hours freed</div>
         </div>
         <div class="stat">
           <div class="stat-label">Warnings answered</div>
           <div class="stat-value" id="stat-answered">0</div>
-          <div class="stat-note">Owner confirmed or person detected</div>
+          <div class="stat-note">Confirmed or detected</div>
         </div>
       </div>
 
@@ -76,9 +82,29 @@
           to answer before the room is released.
         </p>
       </div>
+
+      <div class="room-controls">
+        <input type="search" id="room-search" placeholder="Search rooms by name or ID..." aria-label="Search rooms" />
+        <select id="filter-status" aria-label="Filter status">
+          <option value="all">All statuses</option>
+          <option value="good">In use / Confirmed</option>
+          <option value="warning">Warned / Looks empty</option>
+          <option value="idle">Free</option>
+        </select>
+      </div>
+
       <ul id="room-grid" class="room-grid"></ul>
 
-      <div class="section-head"><h2>Decision log</h2></div>
+      <div class="section-head">
+        <h2>Today's Timetable</h2>
+        <p class="muted">Live room utilization overview (8:00 AM – 8:00 PM).</p>
+      </div>
+      <div id="timetable" class="panel timetable-container"></div>
+
+      <div class="section-head section-head-action">
+        <h2>Decision log</h2>
+        <button type="button" class="ghost-btn" id="export-csv">Export CSV</button>
+      </div>
       <ol id="feed" class="feed panel"></ol>
     </section>
 

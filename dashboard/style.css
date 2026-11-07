@@ -113,7 +113,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 /* ---------- Stat tiles ---------- */
 .stats {
   display: grid;
-  grid-template-columns: 1.4fr repeat(3, 1fr);
+  grid-template-columns: 1.3fr repeat(4, 1fr);
   gap: 12px;
   margin-bottom: 28px;
 }
@@ -129,8 +129,26 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .hero .stat-value { font-size: 3.2rem; line-height: 1.1; }
 .unit { font-size: 1rem; font-weight: 500; color: var(--ink-2); margin-left: 6px; }
 
+/* ---------- Controls & Room Search ---------- */
+.room-controls {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.room-controls input {
+  flex: 1;
+  min-width: 200px;
+  margin-top: 0;
+}
+.room-controls select {
+  width: 200px;
+  margin-top: 0;
+}
+
 /* ---------- Rooms ---------- */
 .section-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; margin: 0 0 12px; }
+.section-head-action { justify-content: space-between; align-items: center; }
 .section-head .muted { font-size: 0.85rem; max-width: 720px; }
 
 .room-grid {
@@ -138,7 +156,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
   margin: 0 0 32px;
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   gap: 12px;
 }
 .room {
@@ -177,13 +195,69 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .room[data-tone="critical"] .stage-icon { background: var(--critical); }
 .stage-detail { font-size: 0.82rem; color: var(--ink-2); min-height: 1.2em; }
 
-.reading { display: flex; gap: 6px; font-size: 0.8rem; color: var(--ink-2); }
+.reading { display: flex; gap: 6px; font-size: 0.8rem; color: var(--ink-2); flex-wrap: wrap; }
 
 .demo-row { display: flex; gap: 6px; flex-wrap: wrap; border-top: 1px dashed var(--hairline); padding-top: 10px; }
 .demo-row button { padding: 4px 10px; font-size: 0.8rem; }
 
+/* ---------- Timetable ---------- */
+.timetable-container {
+  padding: 16px;
+  margin-bottom: 32px;
+  overflow-x: auto;
+}
+.timetable-row {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--hairline);
+  font-size: 0.85rem;
+}
+.timetable-row:last-child {
+  border-bottom: none;
+}
+.timetable-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.timetable-track {
+  position: relative;
+  height: 24px;
+  background: color-mix(in srgb, var(--hairline) 50%, var(--surface));
+  border-radius: 4px;
+  overflow: hidden;
+}
+.timetable-block {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 3px;
+  font-size: 0.72rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0 4px;
+}
+.timetable-hours {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  font-size: 0.7rem;
+  color: var(--muted);
+  margin-left: 152px;
+  margin-bottom: 6px;
+}
+
 /* ---------- Feed ---------- */
-.feed { list-style: none; margin: 0 0 32px; padding: 6px 0; }
+.feed { list-style: none; margin: 0 0 32px; padding: 6px 0; max-height: 380px; overflow-y: auto; }
 .feed li {
   display: grid;
   grid-template-columns: 72px 90px 1fr;
@@ -233,10 +307,12 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 }
 
 /* ---------- Small screens ---------- */
-@media (max-width: 860px) {
+@media (max-width: 900px) {
   .stats { grid-template-columns: 1fr 1fr; }
   .hero { grid-column: 1 / -1; }
   .mine-grid { grid-template-columns: 1fr; }
+  .timetable-hours { margin-left: 0; }
+  .timetable-row { grid-template-columns: 1fr; }
 }
 @media (max-width: 520px) {
   main { padding: 16px; }

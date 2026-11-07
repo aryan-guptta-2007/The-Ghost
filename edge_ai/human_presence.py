@@ -25,6 +25,10 @@ DESIGN
    sitting behind a monitor, or momentarily out of frame will produce a
    false negative. We require N vacant readings out of the last M before
    flipping the room's reported state.
+4. LOW-LIGHT ROBUSTNESS: adaptive CLAHE histogram equalization prevents
+   false vacancy in presentation rooms where lights are dimmed for projectors.
+5. HEADCOUNT ESTIMATION: detects single occupants in large auditoriums to
+   flag under-utilized space.
 """
 
 import os
@@ -45,6 +49,25 @@ MIN_CONFIDENCE = float(os.getenv("GHOST_MIN_CONFIDENCE", "0.3"))
 WINDOW_SIZE = int(os.getenv("GHOST_WINDOW_SIZE", "10"))
 # How many frames in the window must agree before we flip state.
 FLIP_THRESHOLD = int(os.getenv("GHOST_FLIP_THRESHOLD", "7"))
+# Low-light enhancement (adaptive histogram equalization for dim rooms / projectors)
+ENABLE_LOW_LIGHT_ENHANCE = os.getenv("GHOST_LOW_LIGHT_ENHANCE", "true").lower() == "true"
+
+
+def enhance_low_light(frame):
+    """Enhance contrast for dim presentation/projector rooms using CLAHE."""
+    if frame is None or not ENABLE_LOW_LIGHT_ENHANCE:
+        return frame
+    try:
+        import cv2
+
+        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        l_enhanced = clahe.apply(l)
+        enhanced_lab = cv2.merge((l_enhanced, a, b))
+        return cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
+    except Exception:
+        return frame
 
 
 class _MediaPipeBackend:
@@ -65,14 +88,15 @@ class _MediaPipeBackend:
             min_detection_confidence=0.5,
         )
 
-    def detect(self, frame) -> Tuple[bool, float]:
+    def detect(self, frame) -> Tuple[bool, float, int]:
         import cv2
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        processed_frame = enhance_low_light(frame)
+        rgb = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
         rgb.flags.writeable = False
         result = self._pose.process(rgb)
         if not result.pose_landmarks:
-            return False, 0.0
+            return False, 0.0, 0
         # Upper-body landmarks only: nose, eyes, ears, shoulders, elbows.
         # Averaging all 33 landmarks penalises seated people whose legs are
         # not visible to a desk-mounted webcam, which is the normal case.
@@ -86,7 +110,7 @@ class _MediaPipeBackend:
         confidence = clear / len(visibilities) if visibilities else 0.0
         # MediaPipe returning landmarks at all is itself strong evidence,
         # so presence is the detection, and confidence is the quality of it.
-        return True, confidence
+        return True, confidence, 1
 
     def close(self):
         self._pose.close()
@@ -107,16 +131,18 @@ class _HogBackend:
         self._hog = cv2.HOGDescriptor()
         self._hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
 
-    def detect(self, frame) -> Tuple[bool, float]:
+    def detect(self, frame) -> Tuple[bool, float, int]:
+        processed_frame = enhance_low_light(frame)
         rects, weights = self._hog.detectMultiScale(
-            frame, winStride=(8, 8), padding=(8, 8), scale=1.05
+            processed_frame, winStride=(8, 8), padding=(8, 8), scale=1.05
         )
         if len(rects) == 0:
-            return False, 0.0
+            return False, 0.0, 0
         # HOG weights are SVM margins; squash into a rough 0..1 confidence.
         best = float(np.max(weights))
         confidence = min(1.0, max(0.0, best / 2.0))
-        return confidence >= MIN_CONFIDENCE, confidence
+        headcount = len(rects)
+        return confidence >= MIN_CONFIDENCE, confidence, headcount
 
     def close(self):
         pass
@@ -138,7 +164,7 @@ def _build_backend():
 
 
 class PresenceDetector:
-    """Stateful detector with temporal debounce.
+    """Stateful detector with temporal debounce and headcount tracking.
 
     Usage
     -----
@@ -174,16 +200,23 @@ class PresenceDetector:
         Returns a dict with:
             occupied   : bool  — debounced room state
             confidence : float — mean confidence across the window
+            headcount  : int   — estimated occupant count
             changed    : bool  — True only on the frame the state flipped
             raw        : bool  — this single frame's unfiltered detection
             samples    : int   — how many frames in the window so far
             settled    : bool  — enough frames seen for `occupied` to be
                                  evidence rather than the starting guess
         """
-        raw, confidence = self._backend.detect(frame)
-        self._window.append((raw, confidence))
+        backend_result = self._backend.detect(frame)
+        if len(backend_result) == 3:
+            raw, confidence, count = backend_result
+        else:
+            raw, confidence = backend_result
+            count = 1 if raw else 0
 
-        occupied_votes = sum(1 for r, _ in self._window if r)
+        self._window.append((raw, confidence, count))
+
+        occupied_votes = sum(1 for item in self._window if item[0])
         vacant_votes = len(self._window) - occupied_votes
 
         changed = False
@@ -199,12 +232,16 @@ class PresenceDetector:
                 self._last_flip = time.time()
 
         mean_conf = (
-            float(np.mean([c for _, c in self._window])) if self._window else 0.0
+            float(np.mean([item[1] for item in self._window])) if self._window else 0.0
+        )
+        current_headcount = (
+            max([item[2] for item in self._window]) if (self._state and self._window) else 0
         )
 
         return {
             "occupied": self._state,
             "confidence": round(mean_conf, 3),
+            "headcount": current_headcount,
             "changed": changed,
             "raw": raw,
             "samples": len(self._window),
@@ -233,6 +270,7 @@ if __name__ == "__main__":
             print(
                 f"occupied={verdict['occupied']} "
                 f"conf={verdict['confidence']:.2f} "
+                f"headcount={verdict.get('headcount', 0)} "
                 f"samples={verdict['samples']}{flag}"
             )
             time.sleep(1.0)

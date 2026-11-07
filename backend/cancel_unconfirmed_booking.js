@@ -6,6 +6,7 @@
     - if the room has seen a person since the warning, clear it instead
     - cancel the booking (if it is still running)
     - mark the enforcement record 'reclaimed'
+    - physically switch OFF the room's power relay via smart-plug/BMS hook
     - write audit_logs/ghost_{bookingId} with the energy saved, computed as
       the room's power draw x the booking time that was left
     - bump the dashboard counters in stats/global
@@ -19,6 +20,7 @@ const { db, FieldValue, Timestamp } = require('./lib/firebase');
 const { ACTIVE_STATUSES, DEFAULT_ROOM_KW, energySavedKwh } = require('./lib/config');
 const { statsRef } = require('./lib/enforcement');
 const { logDecision } = require('./decision_logger');
+const { switchRoomPower } = require('./lib/power');
 
 /**
  * Normally a person walking in clears the warning as the reading arrives. If
@@ -127,6 +129,8 @@ async function cancelUnconfirmedBookingsLogic(now = Timestamp.now()) {
           audit.roomId,
           audit.bookingId
         );
+        // Physical smart plug / relay cut-off: switch OFF room power
+        await switchRoomPower(audit.roomId, 'OFF', 'ghost_reclaimed');
       }
     } catch (err) {
       console.error(`Failed to process confirmation ${doc.id}:`, err);

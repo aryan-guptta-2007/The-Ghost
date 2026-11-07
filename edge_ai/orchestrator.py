@@ -23,6 +23,8 @@ FIXES vs. the original version
 5. Dead-letter instead of silent drop. Payloads that can no longer be
    delivered are moved to a `dead_letter` table rather than deleted, so
    failures are auditable.
+6. Headcount & low-light handling: tracks occupant count and contrast
+   adjustments for dimmed classrooms.
 
 QUEUE RULES
 -----------
@@ -159,12 +161,15 @@ def _dead_letter(payload_json: str, attempts: int, error_msg: str, row_id: Optio
 # ----------------------------------------------------------------------
 def _send_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
-        return send_room_metadata(
-            room_id=payload["room_id"],
-            status=payload["status"],
-            confidence=payload["confidence"],
-            timestamp=payload["timestamp"],
-        )
+        kwargs = {
+            "room_id": payload["room_id"],
+            "status": payload["status"],
+            "confidence": payload["confidence"],
+            "timestamp": payload["timestamp"],
+        }
+        if "headcount" in payload:
+            kwargs["headcount"] = payload["headcount"]
+        return send_room_metadata(**kwargs)
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 
@@ -244,12 +249,15 @@ def run():
             # `frame` is deliberately not stored or forwarded anywhere.
 
             if _should_send(verdict, timestamp, last_sent_at):
-                _deliver({
+                data = {
                     "room_id": ROOM_ID,
                     "status": "occupied" if verdict["occupied"] else "vacant",
                     "confidence": verdict["confidence"],
                     "timestamp": _iso(timestamp),
-                })
+                }
+                if verdict.get("headcount", 0) > 0:
+                    data["headcount"] = verdict["headcount"]
+                _deliver(data)
                 last_sent_at = timestamp
 
             _flush_pending()

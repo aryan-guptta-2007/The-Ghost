@@ -64,6 +64,25 @@ async function sweepActiveBookingsLogic(now = Timestamp.now()) {
   const roomSnaps = await db.getAll(...roomIds.map((id) => db.collection('rooms').doc(id)));
   const rooms = new Map(roomSnaps.map((s) => [s.id, s.exists ? s.data() : null]));
 
+  // Monitor hardware health for silent sensors
+  for (const [roomId, room] of rooms.entries()) {
+    if (!room) continue;
+    const isSilent = !room.lastReading || (now.toMillis() - room.lastReading.timestamp.toMillis()) / 1000 > STALE_SECONDS;
+    if (isSilent && room.hardwareStatus !== 'offline') {
+      try {
+        await db.collection('rooms').doc(roomId).update({ hardwareStatus: 'offline', lastHardwareAlertAt: now });
+      } catch {
+        // Non-blocking
+      }
+    } else if (!isSilent && room.hardwareStatus === 'offline') {
+      try {
+        await db.collection('rooms').doc(roomId).update({ hardwareStatus: 'online' });
+      } catch {
+        // Non-blocking
+      }
+    }
+  }
+
   for (const doc of running) {
     result.checked += 1;
     const reason = ghostReason(rooms.get(doc.get('roomId')), now);

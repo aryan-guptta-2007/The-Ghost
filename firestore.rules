@@ -90,14 +90,14 @@ service cloud.firestore {
     // is public, and this is where push tokens live.
     match /users/{userId} {
       allow read: if isSignedIn() && request.auth.uid == userId;
-      // A user may register their own FCM token but nothing else.
+      // A user may register their own FCM token(s) but nothing else.
       allow update: if isSignedIn()
                     && request.auth.uid == userId
                     && request.resource.data.diff(resource.data)
-                         .affectedKeys().hasOnly(['fcmToken']);
+                         .affectedKeys().hasOnly(['fcmToken', 'fcmTokens']);
       allow create: if isSignedIn()
                     && request.auth.uid == userId
-                    && request.resource.data.keys().hasOnly(['fcmToken']);
+                    && request.resource.data.keys().hasOnly(['fcmToken', 'fcmTokens']);
       allow delete: if false;
     }
 

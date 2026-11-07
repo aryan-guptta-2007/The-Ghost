@@ -13,9 +13,15 @@ const {
   STALE_SECONDS,
   SWEEP_EVERY_MINUTES,
 } = require('../lib/config');
-const { sweepDue } = require('../scheduler');
+const { sweepDue, retentionDue } = require('../scheduler');
 const { ghostReason } = require('../sweep_active_bookings');
 const { Timestamp } = require('../lib/firebase');
+const {
+  formatIcsDate,
+  generateIcsFeed,
+  buildCancellationIcs,
+  parseExternalBookingPayload,
+} = require('../lib/calendar');
 
 describe('HMAC signing', () => {
   // The same vector is asserted in edge_ai/tests/test_signing.py. If either
@@ -112,6 +118,8 @@ describe('free-tier defaults', () => {
     assert.equal(SWEEP_EVERY_MINUTES, 5);
     const at = (minute) => Timestamp.fromMillis(minute * 60_000 + 7_000);
     assert.deepEqual([0, 1, 2, 3, 4, 5].map((m) => sweepDue(at(m))), [true, false, false, false, false, true]);
+    assert.equal(retentionDue(at(60)), true);
+    assert.equal(retentionDue(at(59)), false);
   });
 });
 
@@ -146,5 +154,57 @@ describe('secrets', () => {
     } finally {
       restore();
     }
+  });
+});
+
+describe('calendar integration', () => {
+  test('formatIcsDate formats Date into UTC iCal string', () => {
+    const d = new Date('2026-08-01T10:30:00.000Z');
+    assert.equal(formatIcsDate(d), '20260801T103000Z');
+  });
+
+  test('generateIcsFeed produces standard VCALENDAR with VEVENT items', () => {
+    const room = { id: 'room_101', name: 'Seminar Room 101' };
+    const bookings = [
+      {
+        id: 'b1',
+        roomId: 'room_101',
+        startTime: new Date('2026-08-01T09:00:00Z'),
+        endTime: new Date('2026-08-01T10:00:00Z'),
+        status: 'scheduled',
+      },
+    ];
+    const ics = generateIcsFeed({ room, bookings });
+    assert.match(ics, /BEGIN:VCALENDAR/);
+    assert.match(ics, /PRODID:-\/\/Ghost Resource Buster/);
+    assert.match(ics, /UID:ghost-booking-b1@ghost-resource-buster/);
+    assert.match(ics, /DTSTART:20260801T090000Z/);
+    assert.match(ics, /DTEND:20260801T100000Z/);
+    assert.match(ics, /END:VCALENDAR/);
+  });
+
+  test('buildCancellationIcs produces cancellation notice', () => {
+    const booking = {
+      id: 'b1',
+      roomId: 'room_101',
+      startTime: new Date('2026-08-01T09:00:00Z'),
+      endTime: new Date('2026-08-01T10:00:00Z'),
+    };
+    const ics = buildCancellationIcs(booking, { name: 'Seminar Room 101' });
+    assert.match(ics, /METHOD:CANCEL/);
+    assert.match(ics, /STATUS:CANCELLED/);
+  });
+
+  test('parseExternalBookingPayload normalises external calendar webhook', () => {
+    const payload = {
+      roomId: 'room_201',
+      startTime: '2026-09-01T14:00:00Z',
+      endTime: '2026-09-01T15:30:00Z',
+      id: 'ext_event_123',
+    };
+    const parsed = parseExternalBookingPayload(payload);
+    assert.equal(parsed.roomId, 'room_201');
+    assert.equal(parsed.durationMinutes, 90);
+    assert.equal(parsed.externalId, 'ext_event_123');
   });
 });

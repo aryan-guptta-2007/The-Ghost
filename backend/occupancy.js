@@ -6,15 +6,17 @@
 
     1. Verify the HMAC-SHA256 signature: the room's own device key, or the
        master secret unless GHOST_REQUIRE_DEVICE_KEYS is on.
-    2. Reject payloads outside a 5-minute freshness window, and any reading
+    2. Check device revocation: individual compromised devices can be
+       flagged revoked: true on their room doc.
+    3. Reject payloads outside a 5-minute freshness window, and any reading
        that is not newer than the room's last one. That second rule stops
        exact replays and stale out-of-order deliveries without storing a doc
        per reading, which keeps writes to one per heartbeat.
-    3. Normalise the edge schema into the backend schema:
-         edge    { room_id, status: "occupied"|"vacant", confidence, timestamp }
-         backend { roomId,  humanPresent: bool,          confidence, timestamp }
-    4. Update rooms/{roomId}.lastReading, which the sweep and dashboard read.
-    5. Judge it:
+    4. Normalise the edge schema into the backend schema:
+         edge    { room_id, status: "occupied"|"vacant", confidence, timestamp, headcount? }
+         backend { roomId,  humanPresent: bool,          confidence, timestamp, headcount? }
+    5. Update rooms/{roomId}.lastReading and set hardwareStatus: 'online'.
+    6. Judge it:
          vacant   + booking past its grace period -> flagGhost (warn the owner)
          occupied + an open warning               -> clearByPresence
 
@@ -43,17 +45,22 @@ function parseTimestamp(raw) {
  * than what is already there. Also used by the demo endpoint, which is
  * authenticated by Firebase Auth instead of HMAC.
  */
-async function writeReading({ roomId, humanPresent, confidence, timestamp, source }) {
+async function writeReading({ roomId, humanPresent, confidence, headcount, timestamp, source }) {
   const roomRef = db.collection('rooms').doc(roomId);
   const ts = Timestamp.fromDate(timestamp);
   await db.runTransaction(async (tx) => {
     const room = await tx.get(roomRef);
     if (!room.exists) throw new HttpError(404, `Unknown room ${roomId}`);
+    if (room.get('revoked') === true) {
+      throw new HttpError(403, `Device for room ${roomId} has been revoked`);
+    }
     const last = room.get('lastReading');
     if (last && last.timestamp.toMillis() >= ts.toMillis()) {
       throw new HttpError(409, 'Reading is not newer than the last one (duplicate, replay or late delivery)');
     }
-    tx.update(roomRef, { lastReading: { humanPresent, confidence, timestamp: ts, source } });
+    const readingData = { humanPresent, confidence, timestamp: ts, source };
+    if (typeof headcount === 'number') readingData.headcount = headcount;
+    tx.update(roomRef, { lastReading: readingData, hardwareStatus: 'online' });
   });
 }
 
@@ -103,6 +110,7 @@ async function receiveReading(payload, secret, nowMs = Date.now()) {
     roomId,
     humanPresent,
     confidence: typeof confidence === 'number' ? confidence : 0,
+    headcount: typeof payload.headcount === 'number' ? payload.headcount : undefined,
     timestamp: ts,
     source: 'edge_device',
   });

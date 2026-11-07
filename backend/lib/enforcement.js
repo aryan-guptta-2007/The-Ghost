@@ -6,7 +6,7 @@
     flagGhost        booking is empty past its grace period
                      -> enforcement/{bookingId}   status 'warned'
                      -> confirmations/{bookingId} status 'pending'
-                     -> FCM push to the booking owner (best effort)
+                     -> FCM push to the booking owner (multi-device) + Webhook
     clearByPresence  a person shows up before the window closes
                      -> both docs move to 'cleared'
     POST /api/confirm and the reclaim job (cron) close the loop.
@@ -75,6 +75,11 @@ async function flagGhost(bookingDoc, reason, source, now) {
   const created = await db.runTransaction(async (tx) => {
     const [existing, fresh] = await tx.getAll(enforcementRef, bookingDoc.ref);
     if (!canWarn(existing, booking, now)) return false;
+    // If the owner already confirmed attendance and the device merely died/went silent,
+    // do not repeatedly harass the confirmed owner.
+    if (existing.exists && existing.get('status') === 'confirmed' && String(reason).includes('Device silent')) {
+      return false;
+    }
     if (!fresh.exists || !ACTIVE_STATUSES.includes(fresh.get('status'))) return false;
 
     tx.set(enforcementRef, {
@@ -129,30 +134,67 @@ async function clearByPresence(bookingId, now) {
 }
 
 /**
- * Push the warning to the owner's device. Best effort: the warning is
- * also visible in the dashboard's "My bookings" view, so a missing token
- * or an FCM failure must never stop enforcement.
+ * Multi-channel warning dispatch:
+ * 1. Web Push (FCM) to all registered browser/mobile tokens for the user
+ * 2. Campus notification webhook (Slack / Discord / Teams) if configured
  */
 async function sendWarning(userId, roomId, bookingId, windowSeconds) {
   if (!userId) return false;
+  let notified = false;
+  const minutes = Math.max(1, Math.round(windowSeconds / 60));
+
   try {
     const user = await db.collection('users').doc(userId).get();
-    const token = user.exists ? user.get('fcmToken') : null;
-    if (!token) return false;
-    const minutes = Math.max(1, Math.round(windowSeconds / 60));
-    await getMessaging().send({
-      token,
-      notification: {
-        title: 'Is anyone in your room?',
-        body: `Your booking for ${roomId} looks empty. Confirm within ${minutes} min or the room will be released.`,
-      },
-      data: { type: 'ghost_warning', bookingId, confirmationId: bookingId, roomId },
-    });
-    return true;
+    const tokens = [];
+    if (user.exists) {
+      const single = user.get('fcmToken');
+      const multiple = user.get('fcmTokens');
+      if (Array.isArray(multiple)) tokens.push(...multiple.filter(Boolean));
+      if (single && !tokens.includes(single)) tokens.push(single);
+    }
+
+    if (tokens.length > 0) {
+      for (const token of tokens) {
+        try {
+          await getMessaging().send({
+            token,
+            notification: {
+              title: 'Is anyone in your room?',
+              body: `Your booking for ${roomId} looks empty. Confirm within ${minutes} min or the room will be released.`,
+            },
+            data: { type: 'ghost_warning', bookingId, confirmationId: bookingId, roomId },
+          });
+          notified = true;
+        } catch {
+          // Stale individual token
+        }
+      }
+    }
   } catch (err) {
     console.error(`FCM send failed for booking ${bookingId}:`, err.message);
-    return false;
   }
+
+  // Campus Notification Webhook (Slack, Teams, Bot)
+  const webhookUrl = process.env.NOTIFICATION_WEBHOOK_URL;
+  if (webhookUrl) {
+    try {
+      await fetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: `Ghost Alert: Room ${roomId} looks empty. Confirm attendance within ${minutes} min.`,
+          roomId,
+          bookingId,
+          userId,
+        }),
+      });
+      notified = true;
+    } catch (err) {
+      console.warn(`Notification webhook failed: ${err.message}`);
+    }
+  }
+
+  return notified;
 }
 
 module.exports = { findActiveBooking, graceElapsed, flagGhost, clearByPresence, statsRef };

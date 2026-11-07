@@ -17,6 +17,7 @@ const { ACTIVE_STATUSES, MIN_BOOKING_MINUTES, MAX_BOOKING_MINUTES } = require('.
 const MAX_ADVANCE_DAYS = 30;
 // Allow a booking that "starts now" to be sent a few minutes late.
 const BACKDATE_TOLERANCE_MS = 5 * 60 * 1000;
+const MAX_CONCURRENT_USER_BOOKINGS = 5;
 
 /**
  * Creates the booking inside a transaction so two people cannot take the
@@ -71,10 +72,40 @@ async function createBookingLogic(uid, { roomId, startTime, durationMinutes }, e
 }
 
 /**
+ * Checks per-user quotas and institutional domain restrictions.
+ */
+async function checkUserBookingLimits(token) {
+  if (token.admin === true) return;
+
+  const allowedDomains = (process.env.ALLOWED_EMAIL_DOMAINS || '')
+    .split(',')
+    .map((d) => d.trim().toLowerCase())
+    .filter(Boolean);
+
+  if (allowedDomains.length > 0 && token.email) {
+    const domain = token.email.split('@')[1]?.toLowerCase();
+    if (!domain || !allowedDomains.includes(domain)) {
+      throw new HttpError(403, `Bookings restricted to approved domains: ${allowedDomains.join(', ')}`);
+    }
+  }
+
+  const activeSnap = await db
+    .collection('bookings')
+    .where('userId', '==', token.uid)
+    .where('status', 'in', ACTIVE_STATUSES)
+    .get();
+
+  if (activeSnap.size >= MAX_CONCURRENT_USER_BOOKINGS) {
+    throw new HttpError(429, `Booking limit reached: maximum ${MAX_CONCURRENT_USER_BOOKINGS} active reservations per user`);
+  }
+}
+
+/**
  * POST /api/bookings. The demo login's password is public, so that account
  * gets demo rooms only; otherwise anyone could fill the real ones.
  */
 async function bookAs(token, body) {
+  await checkUserBookingLimits(token);
   if (token.demo === true && token.admin !== true) {
     requireId(body.roomId, 'roomId');
     const room = await db.collection('rooms').doc(body.roomId).get();
@@ -83,4 +114,4 @@ async function bookAs(token, body) {
   return createBookingLogic(token.uid, body);
 }
 
-module.exports = { createBookingLogic, bookAs };
+module.exports = { createBookingLogic, bookAs, checkUserBookingLimits };

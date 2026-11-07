@@ -9,6 +9,7 @@ Each payload includes:
   - status ("occupied" / "vacant")
   - confidence (float)
   - timestamp (ISO-8601 string, UTC)
+  - optional headcount (int)
   - signature (hex HMAC-SHA256 over the canonical JSON of the fields above)
 
 The signature is verified in backend/lib/hmac.js before any processing.
@@ -62,23 +63,38 @@ def _sign_payload(payload: dict, secret: bytes = None) -> str:
     return hmac.new(secret or _secret(), message, hashlib.sha256).hexdigest()
 
 
-def build_payload(room_id: str, status: str, confidence: float, timestamp: str, secret: bytes = None) -> dict:
+def build_payload(
+    room_id: str,
+    status: str,
+    confidence: float,
+    timestamp: str,
+    secret: bytes = None,
+    headcount: int = None,
+) -> dict:
     payload = {
         "room_id": room_id,
         "status": status,
         "confidence": _normalise_confidence(confidence),
         "timestamp": timestamp,  # ISO-8601 UTC string
     }
+    if headcount is not None and headcount > 0:
+        payload["headcount"] = int(headcount)
     payload["signature"] = _sign_payload(payload, secret)
     return payload
 
 
-def send_room_metadata(room_id: str, status: str, confidence: float, timestamp: str) -> dict:
+def send_room_metadata(
+    room_id: str,
+    status: str,
+    confidence: float,
+    timestamp: str,
+    headcount: int = None,
+) -> dict:
     """POST the metadata to the backend with a signature.
     Returns a dict with ``success`` and either ``response`` or ``error``.
     ``permanent`` is set on a rejection that no retry can fix.
     """
-    payload = build_payload(room_id, status, confidence, timestamp)
+    payload = build_payload(room_id, status, confidence, timestamp, headcount=headcount)
     try:
         resp = requests.post(
             BACKEND_URL,

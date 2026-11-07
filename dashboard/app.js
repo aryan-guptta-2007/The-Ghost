@@ -140,6 +140,7 @@ function startListeners(uid) {
     renderRoomOptions();
     renderMyBookings(); // room names may arrive after the bookings do
     render();
+    renderTimetable();
   });
   listen(query(collection(db, 'confirmations'), where('userId', '==', uid), where('status', '==', 'pending')), (s) => {
     state.myWarnings = s.docs.map((d) => ({ id: d.id, ...d.data() }));
@@ -154,6 +155,7 @@ function startListeners(uid) {
   listen(query(collection(db, 'bookings'), where('status', 'in', ['scheduled', 'active'])), (s) => {
     state.bookings = toMap(s);
     render();
+    renderTimetable();
   });
   listen(query(collection(db, 'enforcement'), orderBy('createdAt', 'desc'), limit(100)), (s) => {
     state.enforcement = toMap(s);
@@ -167,7 +169,7 @@ function startListeners(uid) {
     state.stats = s.data() || {};
     renderStats();
   });
-  listen(query(collection(db, 'decision_logs'), orderBy('timestamp', 'desc'), limit(15)), (s) => {
+  listen(query(collection(db, 'decision_logs'), orderBy('timestamp', 'desc'), limit(50)), (s) => {
     state.feed = s.docs.map((d) => d.data());
     renderFeed();
   });
@@ -220,11 +222,13 @@ function stageFor(room, now) {
 
 function readingText(room, now) {
   const r = room.lastReading;
-  if (!r) return 'Sensor: never reported';
+  const relay = room.powerState ? ` · Relay: ${room.powerState}` : '';
+  if (!r) return `Sensor: never reported${relay}`;
   const age = now - r.timestamp.toMillis();
-  if (age > STALE_MS) return `Sensor: silent for ${Math.round(age / 60_000)} min`;
+  if (age > STALE_MS) return `Sensor: silent for ${Math.round(age / 60_000)} min (Offline)${relay}`;
   const source = r.source === 'demo' ? ' (demo)' : '';
-  return `Sensor: ${r.humanPresent ? 'person present' : 'empty'}${source}, ${ago(age)}`;
+  const count = typeof r.headcount === 'number' && r.headcount > 0 ? ` (${r.headcount} ${r.headcount === 1 ? 'occupant' : 'occupants'})` : '';
+  return `Sensor: ${r.humanPresent ? 'person present' : 'empty'}${count}${source}, ${ago(age)}${relay}`;
 }
 
 // ---------------------------------------------------------------------
@@ -239,7 +243,14 @@ function buildCard(room) {
   const name = el('div', 'room-name');
   const meta = el('div', 'room-meta');
   titles.append(name, meta);
-  head.append(titles);
+
+  const icalLink = el('a', 'ical-btn', 'iCal');
+  icalLink.title = 'Subscribe to room schedule feed (.ics)';
+  icalLink.href = `${API_BASE || '/api'}/calendar?roomId=${encodeURIComponent(room.id)}`;
+  icalLink.target = '_blank';
+  icalLink.rel = 'noopener';
+
+  head.append(titles, icalLink);
 
   const stage = el('div', 'stage');
   const icon = el('span', 'stage-icon');
@@ -280,13 +291,29 @@ function render() {
   const grid = $('room-grid');
   const ids = [...state.rooms.keys()].sort();
 
+  const search = ($('room-search')?.value || '').toLowerCase().trim();
+  const filter = $('filter-status')?.value || 'all';
+
+  const visibleIds = ids.filter((id) => {
+    const room = state.rooms.get(id);
+    const matchesSearch = !search || id.toLowerCase().includes(search) || (room.name && room.name.toLowerCase().includes(search));
+    if (!matchesSearch) return false;
+    if (filter === 'all') return true;
+    const stage = stageFor(room, now);
+    if (filter === 'idle') return stage.tone === 'idle';
+    if (filter === 'good') return stage.tone === 'good';
+    if (filter === 'warning') return stage.tone === 'warning' || stage.tone === 'serious' || stage.tone === 'critical';
+    return true;
+  });
+
   for (const [id, card] of cards) {
-    if (!state.rooms.has(id)) {
+    if (!visibleIds.includes(id)) {
       card.li.remove();
       cards.delete(id);
     }
   }
-  ids.forEach((id, i) => {
+
+  visibleIds.forEach((id, i) => {
     const room = state.rooms.get(id);
     let card = cards.get(id);
     if (!card) {
@@ -308,6 +335,56 @@ function render() {
   $('demo-hint').hidden = ![...state.rooms.values()].some((r) => r.demo);
 }
 
+function renderTimetable() {
+  const container = $('timetable');
+  if (!container || !staff) return;
+  container.replaceChildren();
+
+  const now = new Date();
+  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 8, 0, 0).getTime();
+  const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 20, 0, 0).getTime();
+  const totalDayMs = endOfDay - startOfDay;
+
+  const header = el('div', 'timetable-hours');
+  for (let h = 8; h <= 19; h++) {
+    header.append(el('span', '', `${h > 12 ? h - 12 : h} ${h >= 12 ? 'PM' : 'AM'}`));
+  }
+  container.append(header);
+
+  const rooms = [...state.rooms.values()].sort((a, b) => a.id.localeCompare(b.id));
+  if (!rooms.length) {
+    container.append(el('div', 'empty', 'No rooms available.'));
+    return;
+  }
+
+  for (const r of rooms) {
+    const row = el('div', 'timetable-row');
+    const name = el('div', 'timetable-name', r.name || r.id);
+    const track = el('div', 'timetable-track');
+
+    for (const b of state.bookings.values()) {
+      if (b.roomId !== r.id) continue;
+      const bStart = b.startTime.toMillis();
+      const bEnd = b.endTime.toMillis();
+      if (bEnd <= startOfDay || bStart >= endOfDay) continue;
+
+      const blockStart = Math.max(bStart, startOfDay);
+      const blockEnd = Math.min(bEnd, endOfDay);
+      const leftPct = ((blockStart - startOfDay) / totalDayMs) * 100;
+      const widthPct = Math.max(1.5, ((blockEnd - blockStart) / totalDayMs) * 100);
+
+      const timeText = new Date(bStart).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const block = el('div', 'timetable-block', timeText);
+      block.style.left = `${leftPct}%`;
+      block.style.width = `${widthPct}%`;
+      track.append(block);
+    }
+
+    row.append(name, track);
+    container.append(row);
+  }
+}
+
 function renderStats() {
   const s = state.stats;
   const kwh = s.energySavedKwh || 0;
@@ -316,7 +393,13 @@ function renderStats() {
   $('stat-reclaimed').textContent = (s.roomsReclaimed || 0).toLocaleString();
   $('stat-answered').textContent = ((s.warningsConfirmed || 0) + (s.warningsCleared || 0)).toLocaleString();
   const hours = (s.minutesReclaimed || 0) / 60;
-  $('stat-hours').textContent = hours ? `${hours.toFixed(1)} room-hours freed` : '';
+  $('stat-hours').textContent = hours ? `${hours.toFixed(1)} room-hours freed` : '0 room-hours freed';
+
+  // ESG Carbon & Money Saved calculation
+  const carbon = kwh * 0.82; // 0.82 kg CO2 / kWh grid factor
+  const rupees = Math.round(kwh * 8); // ₹8 / kWh average tariff
+  if ($('stat-carbon')) $('stat-carbon').textContent = carbon < 100 ? carbon.toFixed(1) : Math.round(carbon).toLocaleString();
+  if ($('stat-money')) $('stat-money').textContent = `₹${rupees.toLocaleString()} saved (at ₹8/kWh)`;
 }
 
 function renderFeed() {
@@ -341,8 +424,6 @@ const warningCards = new Map(); // confirmationId -> { card, title, countdown }
 function renderWarnings() {
   const box = $('my-warnings');
   const now = Date.now();
-  // A warning stays pending until the next reclaim run even if its booking
-  // has already ended, for example because the owner cancelled it.
   const warnings = state.myWarnings.filter((w) => {
     const booking = state.myBookings.find((b) => b.id === w.bookingId);
     return !booking || LIVE_STATUSES.includes(booking.status);
@@ -363,7 +444,7 @@ function renderWarnings() {
     parts.countdown.textContent = left > 0
       ? `It will be released in ${clock(left)} unless you confirm you are there.`
       : 'Time is up. This booking is being released.';
-    if (left <= 0) parts.btn.disabled = true; // the API would answer 410
+    if (left <= 0) parts.btn.disabled = true;
   }
 }
 
@@ -406,7 +487,7 @@ function renderMyBookings() {
     const end = b.endTime.toDate();
     const when = `${start.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}–${end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
     const running = LIVE_STATUSES.includes(b.status) && b.endTime.toMillis() > now;
-    const ended = LIVE_STATUSES.includes(b.status) && !running; // waiting for the next sweep
+    const ended = LIVE_STATUSES.includes(b.status) && !running;
     const status = b.cancelReason === 'ghost_reclaimed' ? 'released (no one showed up)' : ended ? 'completed' : b.status;
     info.append(el('div', '', room ? room.name : b.roomId), el('div', 'sub', `${when} · ${status}`));
     li.append(info);
@@ -492,8 +573,6 @@ $('forgot-password').addEventListener('click', async () => {
   try {
     await sendPasswordResetEmail(auth, email);
   } catch (err) {
-    // Only a malformed address is worth reporting. Saying "no such user"
-    // would tell anyone which addresses have accounts.
     if (err.code === 'auth/invalid-email') {
       $('login-error').textContent = 'That email address does not look right.';
       return;
@@ -505,12 +584,41 @@ $('forgot-password').addEventListener('click', async () => {
 
 $('sign-out').addEventListener('click', () => signOut(auth));
 
+// Search and filter event listeners
+$('room-search')?.addEventListener('input', () => render());
+$('filter-status')?.addEventListener('change', () => render());
+
+// Export CSV
+$('export-csv')?.addEventListener('click', () => {
+  if (!state.feed || !state.feed.length) {
+    toast('No decision entries to export yet.');
+    return;
+  }
+  const headers = ['Timestamp', 'Agent', 'Decision', 'Room', 'Reason'];
+  const rows = state.feed.map((d) => [
+    d.timestamp ? d.timestamp.toDate().toISOString() : '',
+    d.agent_name || '',
+    d.decision || '',
+    d.room_id || '',
+    `"${(d.reason || '').replace(/"/g, '""')}"`,
+  ]);
+  const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `ghost-decision-log-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('Decision log CSV downloaded.');
+});
+
 // ---------------------------------------------------------------------
 // Push notifications
 // ---------------------------------------------------------------------
 const pushAvailable = () => Boolean(VAPID_KEY) && 'serviceWorker' in navigator && 'Notification' in window;
 
-/** Gets this browser's FCM token and stores it where the backend looks for it. */
+/** Gets this browser's FCM token and stores it in users/{uid}. */
 async function registerForPush(uid) {
   const { getMessaging, getToken, isSupported } = await import(FIREBASE_MESSAGING);
   if (!(await isSupported())) throw new Error('This browser does not support push notifications');
@@ -538,9 +646,7 @@ $('enable-push').addEventListener('click', async () => {
   }
 });
 
-/** Offer push to people who have not answered yet; refresh the token for those who said yes. */
 function setUpPush(user, claims) {
-  // The demo login is shared, so a token on it would reach whoever used it last.
   const usable = pushAvailable() && !claims.demo;
   $('enable-push').hidden = !usable || Notification.permission !== 'default';
   if (usable && Notification.permission === 'granted') {
@@ -548,8 +654,6 @@ function setUpPush(user, claims) {
   }
 }
 
-// The demo button appears on localhost (emulator account) or when the
-// deployment ships a demo-login.json with a read-only demo account.
 const demoLogin = LOCAL
   ? EMULATOR_DEMO
   : await fetch('demo-login.json').then((r) => (r.ok ? r.json() : null)).catch(() => null);
@@ -570,7 +674,6 @@ onAuthStateChanged(auth, async (user) => {
   timers = [];
   cards.forEach((c) => c.li.remove());
   cards.clear();
-  // Nothing from the previous user may survive into the next session.
   warningCards.forEach((w) => w.card.remove());
   warningCards.clear();
   state = emptyState();
@@ -594,6 +697,5 @@ onAuthStateChanged(auth, async (user) => {
   setUpPush(user, claims);
 
   startListeners(user.uid);
-  // Countdowns tick every second without waiting for a snapshot.
-  timers.push(setInterval(() => (render(), renderWarnings()), 1000));
+  timers.push(setInterval(() => (render(), renderWarnings(), renderTimetable()), 1000));
 });

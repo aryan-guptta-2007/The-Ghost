@@ -13,6 +13,7 @@ const { HttpError, requireId } = require('./lib/auth');
 const { ACTIVE_STATUSES } = require('./lib/config');
 const { statsRef } = require('./lib/enforcement');
 const { logDecision } = require('./decision_logger');
+const { switchRoomPower } = require('./lib/power');
 
 async function confirmLogic(uid, confirmationId, now = Timestamp.now()) {
   requireId(confirmationId, 'confirmationId');
@@ -45,6 +46,9 @@ async function confirmLogic(uid, confirmationId, now = Timestamp.now()) {
   });
 
   await logDecision('EnforcerAgent', 'confirmed', 'Owner confirmed attendance', conf.roomId, conf.bookingId);
+  // Ensure power relay is ON for the confirmed occupant
+  await switchRoomPower(conf.roomId, 'ON', 'owner_confirmed');
+
   return { success: true, confirmationId };
 }
 
